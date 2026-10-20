@@ -37,6 +37,10 @@ import os
 import re
 import sys
 
+# ci-pr.sh runs this in bwrap --clearenv with no /etc/passwd: ansible's getpass.getuser() needs USER/LOGNAME
+os.environ.setdefault("USER", "render")
+os.environ.setdefault("LOGNAME", "render")
+
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
