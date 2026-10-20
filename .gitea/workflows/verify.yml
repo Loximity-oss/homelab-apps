@@ -1,0 +1,38 @@
+name: verify
+# L4 app verification + app drift, from main only (scripts/ci-verify.sh refuses any other ref). Read-only.
+# The nightly 03:15 MYT schedule is enabled at cutover (migration step 10); until the apps-play-run wrapper accepts
+# APPS_MODE=verify (infra host/apps-runner, Class C) ci-verify.sh fails closed (exit 2 from the wrapper).
+on:
+  # schedule:
+  #   - cron: "15 19 * * *" # 03:15 MYT, after infra verify (03:00)
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "csv of hostnames (empty = every deployment host)"
+        required: false
+        default: ""
+      apps:
+        description: "csv of catalogue entry names (empty = all)"
+        required: false
+        default: ""
+jobs:
+  verify:
+    if: gitea.ref == 'refs/heads/main'
+    runs-on: host-apps
+    timeout-minutes: 240 # > host lock wait (60 min) + a full verify
+    steps:
+      - name: verify apps (L4)
+        env:
+          GIT_TOKEN: ${{ gitea.token }}
+          SERVER: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+          GITHUB_REF: ${{ gitea.ref }}
+          SHA: ${{ gitea.sha }}
+          EVENT: ${{ gitea.event_name }}
+          HOSTS: ${{ inputs.hosts }}
+          APPS: ${{ inputs.apps }}
+        run: |
+          rm -rf base
+          git clone -q --branch main "${SERVER%%://*}://ci:${GIT_TOKEN}@${SERVER#*://}/${REPO}.git" base
+          git -C base checkout -q "$SHA"
+          bash base/scripts/ci-verify.sh

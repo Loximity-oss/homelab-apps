@@ -1,0 +1,46 @@
+name: deploy
+# Deploys catalogue entries to the hosts in deployments/, from main only (scripts/ci-deploy.sh refuses any other ref
+# and checks out main's sha). Until cutover (migration step 10) infra alone deploys AdGuard/k3s and this runs in
+# CHECK mode: APPS_MODE is set here, literally, never from an input. Switching to apply is its own Class C PR.
+# Dispatch inputs (infra apply, Faris) are untrusted: passed only as env, intersected with deployments and specs.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "csv of hostnames (empty = every host of the changed deployments)"
+        required: false
+        default: ""
+      apps:
+        description: "csv of catalogue entry names (empty = all changed)"
+        required: false
+        default: ""
+      infra_pr:
+        description: "infra PR number that dispatched this run (report is commented there)"
+        required: false
+        default: ""
+jobs:
+  deploy:
+    if: gitea.ref == 'refs/heads/main'
+    runs-on: host-apps
+    timeout-minutes: 240 # > host lock wait (60 min) + the longest wave set (proposal 2.3)
+    steps:
+      - name: deploy (check mode)
+        env:
+          APPS_MODE: check
+          GIT_TOKEN: ${{ gitea.token }}
+          SERVER: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+          GITHUB_REF: ${{ gitea.ref }}
+          SHA: ${{ gitea.sha }}
+          EVENT: ${{ gitea.event_name }}
+          BEFORE: ${{ gitea.event.before }}
+          HOSTS: ${{ inputs.hosts }}
+          APPS: ${{ inputs.apps }}
+          INFRA_PR: ${{ inputs.infra_pr }}
+        run: |
+          rm -rf base
+          git clone -q --branch main "${SERVER%%://*}://ci:${GIT_TOKEN}@${SERVER#*://}/${REPO}.git" base
+          git -C base checkout -q "$SHA"
+          bash base/scripts/ci-deploy.sh
