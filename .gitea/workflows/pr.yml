@@ -1,0 +1,27 @@
+name: pr
+# pull_request_target: this workflow and scripts/, policy/ always come from main; the PR tree is only read
+# (lint, validate, classify, offline render). Nothing is merged here: the merge broker (infra #135, CT 300 timer)
+# merges from the class.json this job writes. Written by Claude/Faris only (no agent writes .gitea/**, infra #126).
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+jobs:
+  plan:
+    runs-on: host-plan
+    timeout-minutes: 60
+    steps:
+      - name: lint, validate, classify (offline)
+        env:
+          GIT_TOKEN: ${{ gitea.token }}
+          GITEA_API_TOKEN: ${{ gitea.token }}
+          SERVER: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+          PR: ${{ gitea.event.pull_request.number }}
+          HEAD_SHA: ${{ gitea.event.pull_request.head.sha }}
+          HEAD_REF: ${{ gitea.event.pull_request.head.ref }}
+          BASE_REF: ${{ gitea.event.pull_request.base.ref }}
+          TITLE: ${{ gitea.event.pull_request.title }}
+        run: |
+          rm -rf base head
+          git clone -q --branch main "${SERVER%%://*}://ci:${GIT_TOKEN}@${SERVER#*://}/${REPO}.git" base
+          bash base/scripts/ci-pr.sh
