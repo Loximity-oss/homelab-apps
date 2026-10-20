@@ -1,6 +1,6 @@
 # Skeleton catalogue entry (compose-based). Copy catalog/_example to catalog/<app> and edit.
 # Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5. Not deployable: status example.
-name: example
+name: _example
 owner: oc-cfg
 catalog:
   status: example                # example | beta (stg only) | stable | deprecated
