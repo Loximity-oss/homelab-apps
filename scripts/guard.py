@@ -3,17 +3,22 @@
 Defence in depth before any role runs: every target and every resolved delegate_to target must be
   - a host of THIS deployment and present in the infra specs (terraform/stacks/hm1/<zone>/guests/<host>.yaml),
   - not a protected VMID and not in the template range (homelab-standards protected.yaml `vmids`, `templates`),
+  - not a no-apps VMID (policy/no-apps.yaml `vmids`, e.g. 210 hm1-dmz-app01: Faris's rule, no apps there),
   - ansible_host == spec IP, and neither in a protected.yaml `subnets` network (e.g. 192.168.67.10 in the mgt /28),
   - in the deployment's zone; never localhost / loopback / the controller.
 
 Entry point:
   python3 scripts/guard.py --infra INFRA_CLONE --protected STANDARDS/protected.yaml \
-      --deployment deployments/<zone>/<app>.yaml [--host HOST=ANSIBLE_HOST ...] [--delegate HOST=TARGET ...]
+      --deployment deployments/<zone>/<app>.yaml [--no-apps FILE] [--host HOST=ANSIBLE_HOST ...] \
+      [--delegate HOST=TARGET ...]
+  --no-apps: no-apps list (default: policy/no-apps.yaml next to this script, i.e. main's copy). Always enforced;
+             missing, unparsable or empty = exit 2 (fail closed).
   --host: the resolved inventory ansible_host per host (default: spec IP, i.e. only the spec checks).
   --delegate: a resolved delegate_to target seen for HOST (repeatable).
 Prints JSON {"ok": bool, "errors": [...]}; exit 0 = ok, 1 = refused, 2 = usage/unreadable input (fail closed).
 
-Library: load_specs(infra), load_protected(path), check(zone, hosts, specs, protected, ansible_hosts, delegates).
+Library: load_specs(infra), load_protected(path), load_no_apps(path),
+         check(zone, hosts, specs, protected, ansible_hosts, delegates, no_apps).
 """
 import argparse
 import glob
@@ -25,6 +30,7 @@ import sys
 import yaml
 
 LOCAL = {"localhost", "127.0.0.1", "::1", "ip6-localhost", "hm1-shr-cicd01"}
+DEFAULT_NO_APPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "policy", "no-apps.yaml")
 
 
 def load_specs(infra):
@@ -49,6 +55,24 @@ def load_protected(path):
     return {"vmids": vmids, "templates": (int(tpl[0]), int(tpl[1])) if len(tpl) == 2 else None, "subnets": subnets}
 
 
+def load_no_apps(path):
+    """policy/no-apps.yaml -> set of VMIDs. Missing file raises OSError; anything but a non-empty list
+    (or mapping) of integer VMIDs raises ValueError. Callers treat both as fail closed."""
+    with open(path, encoding="utf-8") as f:
+        d = yaml.safe_load(f)
+    v = d.get("vmids") if isinstance(d, dict) else None
+    if isinstance(v, dict):
+        v = list(v)
+    if not isinstance(v, list) or not v:
+        raise ValueError(f"no-apps: 'vmids' must be a non-empty list ({path})")
+    out = set()
+    for x in v:
+        if isinstance(x, bool) or not isinstance(x, (int, str)) or not str(x).strip().isdigit():
+            raise ValueError(f"no-apps: vmid '{x}' is not an integer ({path})")
+        out.add(int(x))
+    return out
+
+
 def _ip_errors(label, ip, protected):
     try:
         a = ipaddress.ip_address(ip)
@@ -63,7 +87,7 @@ def _ip_errors(label, ip, protected):
     return errs
 
 
-def check_host(host, zone, specs, protected, ansible_host=None):
+def check_host(host, zone, specs, protected, ansible_host=None, no_apps=None):
     if not isinstance(host, str) or host.lower() in LOCAL:
         return [f"{host}: local/controller host"]
     s = specs.get(host)
@@ -77,6 +101,8 @@ def check_host(host, zone, specs, protected, ansible_host=None):
         errs.append(f"{host}: spec has no valid vmid")
     if vmid is not None and vmid in protected["vmids"]:
         errs.append(f"{host}: VMID {vmid} is protected")
+    if vmid is not None and vmid in (no_apps or ()):
+        errs.append(f"{host}: VMID {vmid} gets no apps (policy/no-apps.yaml)")
     t = protected["templates"]
     if vmid is not None and t and t[0] <= vmid <= t[1]:
         errs.append(f"{host}: VMID {vmid} is in the template range")
@@ -91,13 +117,14 @@ def check_host(host, zone, specs, protected, ansible_host=None):
     return errs
 
 
-def check(zone, hosts, specs, protected, ansible_hosts=None, delegates=None):
+def check(zone, hosts, specs, protected, ansible_hosts=None, delegates=None, no_apps=None):
+    """no_apps: set of VMIDs that get no apps (load_no_apps). The CLI always passes it."""
     ansible_hosts = ansible_hosts or {}
     errs = []
     if not hosts:
         errs.append("deployment has no hosts")
     for h in hosts:
-        errs += check_host(h, zone, specs, protected, ansible_hosts.get(h))
+        errs += check_host(h, zone, specs, protected, ansible_hosts.get(h), no_apps)
     for h in ansible_hosts:
         if h not in hosts:
             errs.append(f"{h}: --host given but not a host of this deployment")
@@ -111,7 +138,8 @@ def check(zone, hosts, specs, protected, ansible_hosts=None, delegates=None):
             elif ts not in hosts:
                 errs.append(f"{h}: delegate_to '{ts}' is not a host of this deployment")
             else:
-                errs += [e for e in check_host(ts, zone, specs, protected, ansible_hosts.get(ts)) if e not in errs]
+                errs += [e for e in check_host(ts, zone, specs, protected, ansible_hosts.get(ts), no_apps)
+                         if e not in errs]
     return errs
 
 
@@ -130,6 +158,8 @@ def main(argv=None):
     ap.add_argument("--infra", required=True)
     ap.add_argument("--protected", required=True)
     ap.add_argument("--deployment", required=True)
+    ap.add_argument("--no-apps", dest="no_apps", default=DEFAULT_NO_APPS,
+                    help="no-apps VMID list (default: policy/no-apps.yaml next to this script); always enforced")
     ap.add_argument("--host", action="append")
     ap.add_argument("--delegate", action="append")
     a = ap.parse_args(argv)
@@ -142,12 +172,13 @@ def main(argv=None):
         hosts = dep.get("hosts") if isinstance(dep.get("hosts"), list) else []
         specs = load_specs(a.infra)
         protected = load_protected(a.protected)
+        no_apps = load_no_apps(a.no_apps)
         ah = {k: v[-1] for k, v in _pairs(a.host, "--host").items()}
         dl = _pairs(a.delegate, "--delegate")
-    except (OSError, ValueError, yaml.YAMLError) as e:
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as e:
         print(json.dumps({"ok": False, "errors": [f"input: {e}"]}))
         return 2
-    errs = check(zone, hosts, specs, protected, ah, dl)
+    errs = check(zone, hosts, specs, protected, ah, dl, no_apps)
     if dep.get("zone", zone) != zone:
         errs.append(f"deployment zone '{dep.get('zone')}' != directory '{zone}'")
     print(json.dumps({"ok": not errs, "errors": errs}, indent=2))

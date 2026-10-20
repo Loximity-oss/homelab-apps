@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +18,7 @@ templates: [9000, 9199]
 bridges: [vmbr0]
 subnets: [192.168.67.0/28]   # whole mgt zone
 """
+NO_APPS = "vmids:\n  - 210   # hm1-dmz-app01\n"
 
 
 def write(root, rel, text):
@@ -28,6 +32,13 @@ def spec(root, zone, host, vmid, ip):
     write(root, f"terraform/stacks/hm1/{zone}/guests/{host}.yaml", f"hostname: {host}\nvmid: {vmid}\nip: {ip}\n")
 
 
+def run_main(argv):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = guard.main(argv)
+    return rc, json.loads(buf.getvalue())
+
+
 class Guard(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.TemporaryDirectory()
@@ -37,16 +48,20 @@ class Guard(unittest.TestCase):
         spec(r, "shr", "hm1-shr-vault01", 303, "192.168.70.12")
         spec(r, "wifi", "hm1-wifi-tpl01", 9000, "192.168.69.99")
         spec(r, "wifi", "hm1-wifi-mgt01", 509, "192.168.67.10")
+        spec(r, "dmz", "hm1-dmz-app01", 210, "192.168.60.10")
+        spec(r, "dmz", "hm1-dmz-web01", 211, "192.168.60.11")
         write(r, "protected.yaml", PROTECTED)
+        write(r, "no-apps.yaml", NO_APPS)
         self.specs = guard.load_specs(r)
         self.prot = guard.load_protected(os.path.join(r, "protected.yaml"))
+        self.no_apps = guard.load_no_apps(os.path.join(r, "no-apps.yaml"))
         self.hosts = ["hm1-wifi-dns01", "hm1-wifi-dns02"]
 
     def tearDown(self):
         self.t.cleanup()
 
     def chk(self, hosts=None, zone="wifi", ah=None, dl=None):
-        return guard.check(zone, hosts or self.hosts, self.specs, self.prot, ah, dl)
+        return guard.check(zone, hosts or self.hosts, self.specs, self.prot, ah, dl, self.no_apps)
 
     def test_protected_loaded(self):
         self.assertEqual(self.prot["vmids"], {100, 300, 303})
@@ -100,6 +115,58 @@ class Guard(unittest.TestCase):
         write(self.infra, "p2.yaml", "vmids: {}\nsubnets: []\n")
         with self.assertRaises(ValueError):
             guard.load_protected(os.path.join(self.infra, "p2.yaml"))
+
+
+class NoApps(Guard):
+    """Faris's rule: VM 210 (hm1-dmz-app01) gets no apps (policy/no-apps.yaml)."""
+
+    def dep_args(self, hosts, no_apps=None):
+        write(self.infra, "apps/deployments/dmz/x.yaml", f"app: x\nhosts: [{', '.join(hosts)}]\n")
+        argv = ["--infra", self.infra, "--protected", os.path.join(self.infra, "protected.yaml"),
+                "--deployment", os.path.join(self.infra, "apps/deployments/dmz/x.yaml")]
+        return argv + (["--no-apps", no_apps] if no_apps else [])
+
+    def test_loaded(self):
+        self.assertEqual(self.no_apps, {210})
+
+    def test_repo_file_lists_210(self):
+        self.assertIn(210, guard.load_no_apps(guard.DEFAULT_NO_APPS))
+
+    def test_check_refuses_210(self):
+        errs = self.chk(hosts=["hm1-dmz-app01"], zone="dmz")
+        self.assertTrue(any("no apps" in e for e in errs), errs)
+        self.assertEqual(self.chk(hosts=["hm1-dmz-web01"], zone="dmz"), [])
+
+    def test_check_refuses_210_among_others(self):
+        errs = self.chk(hosts=["hm1-dmz-web01", "hm1-dmz-app01"], zone="dmz")
+        self.assertTrue(any("hm1-dmz-app01" in e and "no apps" in e for e in errs), errs)
+
+    def test_cli_refuses_210_explicit_file(self):
+        rc, out = run_main(self.dep_args(["hm1-dmz-app01"], os.path.join(self.infra, "no-apps.yaml")))
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        self.assertTrue(any("no apps" in e for e in out["errors"]))
+
+    def test_cli_refuses_210_default_file(self):  # no --no-apps: the repo's policy/no-apps.yaml is enforced
+        rc, out = run_main(self.dep_args(["hm1-dmz-app01"]))
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        rc, out = run_main(self.dep_args(["hm1-dmz-web01"]))
+        self.assertEqual(rc, 0, out)
+
+    def test_cli_missing_file_fails_closed(self):
+        rc, out = run_main(self.dep_args(["hm1-dmz-web01"], os.path.join(self.infra, "nope.yaml")))
+        self.assertEqual(rc, 2)
+        self.assertFalse(out["ok"])
+
+    def test_cli_bad_file_fails_closed(self):
+        for i, text in enumerate(("vmids: [\n", "", "vmids: []\n", "- 210\n", "vmids: [abc]\n", "vmids: [true]\n",
+                                  "vmids: 210\n", "other: [210]\n")):
+            p = os.path.join(self.infra, f"bad{i}.yaml")
+            write(self.infra, f"bad{i}.yaml", text)
+            rc, out = run_main(self.dep_args(["hm1-dmz-web01"], p))
+            self.assertEqual(rc, 2, text)
+            self.assertFalse(out["ok"], text)
 
 
 if __name__ == "__main__":
