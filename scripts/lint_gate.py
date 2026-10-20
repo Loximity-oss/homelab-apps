@@ -20,7 +20,7 @@ import yaml
 from jinja2 import Environment, nodes
 from jinja2.exceptions import TemplateSyntaxError
 
-HOST_RE = re.compile(r"^hm1-[a-z]{2,4}-[a-z]{2,8}[0-9]{2}$")
+HOST_RE = re.compile(r"^hm1-[a-z]{2,4}-[a-z][a-z0-9]{1,7}[0-9]{2}$")
 BANNED_VAR = re.compile(r"^(zone|vmid|role|type|os|bao_.*|deploy_.*)$")
 LOCAL = {"localhost", "127.0.0.1", "::1", "ip6-localhost"}
 LOOP_OK = {"with_items", "with_dict", "with_list"}
