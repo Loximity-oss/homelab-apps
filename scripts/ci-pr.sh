@@ -14,6 +14,8 @@
 #   TITLE            PR title (WIP prefix = plan only)
 #   GITEA_API_TOKEN  token with issue/PR write on THIS repo (the job token): comment, labels, review request.
 #                    Clones use gitea_ci_token from OpenBao AppRole ci-plan (read on infra, standards, apps).
+#                    update-branch also uses gitea_ci_token (ci-merger): Gitea starts no workflow for job-token
+#                    events, so an update made with the job token would never get a new check (infra #127 5e).
 # Output: $OUT = /var/lib/devops/plans/apps-<HEAD_SHA>/ : changes.txt (git diff --raw -M main head), class.json,
 #         report.md, comment.md, <check>.log, render/ (runner-side inputs for the broker; pruned after 14 days).
 # Exit:   0 = every check green (whatever the class, WIP included); 1 = a check failed or the run was refused.
@@ -39,12 +41,13 @@ OUT="$PLANS/apps-$HEAD_SHA"; rm -rf "$OUT"; install -d -m 0750 "$OUT" "$OUT/rend
 INFRA="$OUT/infra"; STD="$OUT/standards"
 clone homelab/homelab-infra "$INFRA" "$CLONE_TOKEN"
 clone homelab/homelab-standards "$STD" "$CLONE_TOKEN"
-unset CLONE_TOKEN
+# CLONE_TOKEN (not exported) stays set only until the update-branch step below, then is unset on every path.
+# Until then nothing from the PR runs: only git fetch / worktree add from main's checkout.
 GITEA=(python3 "$INFRA/scripts/gitea.py")      # infra main's client: SERVER, REPO, GITEA_API_TOKEN
 
 MAIN=$(git -C "$BASE" rev-parse HEAD)            # the main commit whose scripts run now = the classification base
 git -C "$BASE" fetch -q origin "refs/pull/$PR/head"
-[ "$(git -C "$BASE" rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] || { echo "PR head moved; a newer run will handle it"; exit 0; }
+[ "$(git -C "$BASE" rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] || { unset CLONE_TOKEN; echo "PR head moved; a newer run will handle it"; exit 0; }
 HEAD_DIR="$WORK/apps-head-$PR"
 git -C "$BASE" worktree remove --force "$HEAD_DIR" >/dev/null 2>&1 || rm -rf "$HEAD_DIR"
 git -C "$BASE" worktree add -q -f --detach "$HEAD_DIR" "$HEAD_SHA"
@@ -54,14 +57,20 @@ note() { echo "$*" >> "$REPORT"; }
 WIP=""; case "$TITLE" in WIP*) WIP=wip;; esac
 
 # Branch behind main: update it (a new run follows on the updated head); if Gitea refuses, the check is red.
+# update-branch runs as ci-merger (CLONE_TOKEN, scoped to that one command) so Gitea starts a new run for the
+# updated head; the job token stays in use for comments and labels.
 if ! git -C "$BASE" merge-base --is-ancestor "$MAIN" "$HEAD_SHA"; then
-  if "${GITEA[@]}" update-branch "$PR" >/dev/null 2>&1; then
+  updated=0
+  GITEA_API_TOKEN="$CLONE_TOKEN" "${GITEA[@]}" update-branch "$PR" >/dev/null 2>&1 && updated=1
+  unset CLONE_TOKEN
+  if [ "$updated" = 1 ]; then
     echo "Branch was behind \`main\`; merged \`main\` into it. A new run will check the updated branch." > "$OUT/comment.md"
     "${GITEA[@]}" comment "$PR" "$OUT/comment.md"; exit 0
   fi
   echo "## ❌ Branch is behind \`main\` and could not be updated automatically: merge \`main\` into it." > "$OUT/comment.md"
   "${GITEA[@]}" labels "$PR" "${WIP}" || true; "${GITEA[@]}" comment "$PR" "$OUT/comment.md"; exit 1
 fi
+unset CLONE_TOKEN
 
 # What changed (input for render-needed, classify and the broker). Paths stay quoted by git if unusual (-> C).
 git -C "$BASE" diff --raw -M --no-abbrev "$MAIN" "$HEAD_SHA" > "$OUT/changes.txt"
