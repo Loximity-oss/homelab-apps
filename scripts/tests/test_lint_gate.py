@@ -88,6 +88,12 @@ BAD = {
     "two modules": "- command: echo\n  shell: echo\n",
 }
 
+ROLE_VARS_BAD = {
+    "defaults dunder": ("catalog/demo/role/defaults/main.yml", "a: __class__\n"),
+    "defaults ansible_": ("catalog/demo/role/defaults/main.yml", "ansible_become: true\n"),
+    "vars zone": ("catalog/demo/role/vars/main.yml", "zone: int\n"),
+}
+
 
 def write(root, rel, text):
     p = os.path.join(root, rel)
@@ -122,11 +128,14 @@ class LintGate(unittest.TestCase):
             with self.subTest(name):
                 self.assertNotEqual(self.lint(TASKS, text), [], name)
 
-    def test_defaults(self):
-        self.assertNotEqual(self.lint("catalog/demo/role/defaults/main.yml", "a: __class__\n"), [])
-        self.assertNotEqual(self.lint("catalog/demo/role/defaults/main.yml", "ansible_become: true\n"), [])
-        self.assertNotEqual(self.lint("catalog/demo/role/vars/main.yml", "zone: int\n"), [])
+    def test_defaults_clean(self):
         self.assertEqual(self.lint("catalog/demo/role/defaults/main.yml", "app_demo_port: 80\n"), [])
+
+    def test_role_vars_bad(self):
+        for name, (rel, text) in ROLE_VARS_BAD.items():
+            with self.subTest(name):
+                self.assertNotEqual(self.lint(rel, text), [], name)
+                os.remove(os.path.join(self.root, rel))
 
     def test_j2_anywhere(self):
         self.assertEqual(self.lint("catalog/demo/files/sub/x.j2", "{{ x | trim }}\n"), [])
