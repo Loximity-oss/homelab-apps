@@ -1,0 +1,35 @@
+---
+# bao_create_secret: pipeline-owned (Class C, never oc-cfg). Proposal 5.1; usage and limits in ../README.md.
+# Caller (a catalogue role): include_role name=bao_create_secret with vars path, keys and data and/or generate
+# (+ hash: bcrypt). Result: bao_create_secret_result = {status: created | exists | check, path, hash}.
+# The script on CT 300 takes app, zone, mode and token from the run dir only, never from these vars.
+- name: bao_create_secret | check mode writes nothing
+  ansible.builtin.set_fact:
+    bao_create_secret_result: {status: check, path: "", hash: null}
+  when: ansible_check_mode
+
+- name: bao_create_secret | create once in OpenBao (on CT 300)
+  ansible.builtin.command:
+    argv: ["{{ ansible_playbook_python }}", "-I", "{{ role_path }}/files/bao_create_secret.py"]
+    stdin: >-
+      {{ {'host': inventory_hostname, 'path': path, 'keys': keys,
+          'data': data | default({}), 'generate': generate | default(none), 'hash': hash | default(none)} | to_json }}
+  delegate_to: localhost
+  become: false
+  no_log: true
+  register: _bao_create_secret
+  changed_when: _bao_create_secret.rc == 0 and (_bao_create_secret.stdout | from_json).status == 'created'
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: bao_create_secret | refused or failed
+  ansible.builtin.fail:
+    msg: "{{ _bao_create_secret.stderr | default('no output') }}"   # the script never prints a value
+  when: not ansible_check_mode and _bao_create_secret.rc != 0
+
+- name: bao_create_secret | result (status, path, hash only)
+  ansible.builtin.set_fact:
+    bao_create_secret_result: "{{ _bao_create_secret.stdout | from_json }}"
+    _bao_create_secret: {}
+  no_log: true
+  when: not ansible_check_mode
