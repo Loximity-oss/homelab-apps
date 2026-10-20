@@ -1,0 +1,2 @@
+- name: restart app
+  ansible.builtin.command: "docker compose -f {{ app_example_dir }}/compose.yaml up -d --force-recreate"
