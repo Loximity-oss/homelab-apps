@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """homelab-apps change classifier (proposal 5.2; migration step 5a, infra #127). Fail closed: anything
-not listed as A or B is C.
+not listed as A or B is C, and any classifier error is C.
 
 Entry point:
   git diff --raw -M <base> <head> > changes.txt
   python3 policy/classify.py --base BASE_DIR --head HEAD_DIR --changes changes.txt   (or --changes - for stdin)
 Prints JSON {"class": "A|B|C", "reasons": [{"path", "class", "why"}]}; exit 0 (2 = usage error).
+Any exception while reading the changes or classifying prints {"class": "C", "reasons": [{"why":
+"classifier error: ..."}]} and still exits 0, so the gate always gets JSON.
 BASE_DIR / HEAD_DIR are checkouts of the PR base and head; a missing one makes every YAML judgement C.
 
 Library: classify(base_dir, head_dir, changes) -> (cls, reasons); changes = [(status, old_mode, new_mode, old, new)].
@@ -114,8 +116,19 @@ def bump(old, new):
     return "minor" if o[1] != n[1] else "patch"
 
 
+def _vsec(app):
+    """The `version` mapping of an app.yaml: {} if absent, None if present but not a mapping (malformed)."""
+    v = app.get("version") if isinstance(app, dict) else None
+    if v is None:
+        return {}
+    return v if isinstance(v, dict) else None
+
+
 def _known(app):
-    k = ((app or {}).get("version") or {}).get("known")
+    vs = _vsec(app)
+    if vs is None:
+        return None
+    k = vs.get("known")
     if isinstance(k, dict):
         return {str(a): b for a, b in k.items()}
     if isinstance(k, list):
@@ -129,7 +142,12 @@ def _known(app):
 
 
 def _bump_c(*apps):
-    return any(str(((a or {}).get("version") or {}).get("bump_class", "")).upper() == "C" for a in apps)
+    """bump_class C on any side; a malformed (non-mapping) `version` counts as C (fail closed)."""
+    for a in apps:
+        vs = _vsec(a)
+        if vs is None or str(vs.get("bump_class", "")).upper() == "C":
+            return True
+    return False
 
 
 # ---------- judges ----------
@@ -143,7 +161,7 @@ def judge_app(base, head):
         if _starts(p, B_APP_LEAVES):
             out.append(("B", name))
         elif p == ("version", "pin"):
-            old, new = base.get("version", {}).get("pin"), head.get("version", {}).get("pin")
+            old, new = (_vsec(base) or {}).get("pin"), (_vsec(head) or {}).get("pin")
             b = bump(old, new)
             if strict_c:
                 out.append(("C", f"{name}: bump_class C"))
@@ -279,9 +297,20 @@ def main(argv=None):
     ap.add_argument("--head", required=True)
     ap.add_argument("--changes", required=True, help="git diff --raw -M output file, or -")
     a = ap.parse_args(argv)
-    text = sys.stdin.read() if a.changes == "-" else open(a.changes, encoding="utf-8").read()
-    cls, reasons = classify(a.base, a.head, parse_raw(text))
-    print(json.dumps({"class": cls, "reasons": reasons}, indent=2))
+    try:
+        if a.changes == "-":
+            text = sys.stdin.read()
+        else:
+            with open(a.changes, encoding="utf-8") as f:
+                text = f.read()
+        cls, reasons = classify(a.base, a.head, parse_raw(text))
+        if cls not in ORDER:
+            raise ValueError(f"unexpected class {cls!r}")
+        out = {"class": cls, "reasons": reasons}
+    except Exception as e:  # fail closed: any error is Class C, and the gate always gets JSON
+        out = {"class": "C", "reasons": [{"path": None, "class": "C",
+                                          "why": f"classifier error: {e.__class__.__name__}: {e}"}]}
+    print(json.dumps(out, indent=2))
     return 0
 
 

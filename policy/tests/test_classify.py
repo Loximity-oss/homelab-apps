@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -159,6 +162,61 @@ class DeployLeaves(Base):
         w(self.h, "catalog/adguard/app.yaml", happ)
         self.assertEqual(self.dep(DEP.replace("version: 0.107.50", "version: 0.107.51")), "B")
         self.assertEqual(self.dep(DEP.replace("version: 0.107.50", "version: 0.107.99")), "C")
+
+
+class FailClosed(Base):
+    """Faris's review of PR #1: a type change must give C, never a crash without JSON."""
+
+    def setUp(self):
+        super().setUp()
+        w(self.b, "catalog/adguard/app.yaml", 'name: adguard\nversion: "1.0.0"\n')
+        w(self.h, "catalog/adguard/app.yaml", "name: adguard\nversion: {pin: 1.0.1}\n")
+        self.ch = os.path.join(self.t.name, "ch.txt")
+        w(self.t.name, "ch.txt", ":100644 100644 aaa bbb M\tcatalog/adguard/app.yaml\n")
+
+    def run_main(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cl.main(["--base", self.b, "--head", self.h, "--changes", self.ch])
+        return rc, json.loads(buf.getvalue())
+
+    def test_string_version_to_mapping(self):  # the exact review case
+        self.assertEqual(self.one("catalog/adguard/app.yaml"), "C")
+        rc, out = self.run_main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["class"], "C")
+
+    def test_mapping_to_string_version(self):
+        w(self.b, "catalog/adguard/app.yaml", APP)
+        w(self.h, "catalog/adguard/app.yaml", 'name: adguard\nversion: "0.107.51"\n')
+        self.assertEqual(self.one("catalog/adguard/app.yaml"), "C")
+
+    def test_deployment_against_string_catalog_version(self):
+        w(self.h, "catalog/adguard/app.yaml", 'name: adguard\nversion: "0.107.51"\n')
+        w(self.h, "deployments/wifi/adguard.yaml", DEP.replace("version: 0.107.50", "version: 0.107.51"))
+        self.assertEqual(self.one("deployments/wifi/adguard.yaml"), "C")
+
+    def test_exception_in_classify_is_c(self):
+        orig = cl.classify
+
+        def boom(*a, **k):
+            raise AttributeError("'str' object has no attribute 'get'")
+
+        cl.classify = boom
+        try:
+            rc, out = self.run_main()
+        finally:
+            cl.classify = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["class"], "C")
+        self.assertTrue(out["reasons"][0]["why"].startswith("classifier error: AttributeError"))
+
+    def test_unreadable_changes_is_c(self):
+        self.ch = os.path.join(self.t.name, "nope.txt")
+        rc, out = self.run_main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["class"], "C")
+        self.assertTrue(out["reasons"][0]["why"].startswith("classifier error"))
 
 
 class Raw(unittest.TestCase):
