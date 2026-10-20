@@ -1,0 +1,16 @@
+# What each guest zone MEANS for apps (proposal 1-boundary-catalogue.md 1.9, Faris 2026-10-19). Class C.
+# Network facts (VLAN, CIDR, router, DHCP) live only in homelab-standards naming/zones.yaml; never repeat them here.
+# catalog.py check: every deployments/<zone>/ has an entry here and guests: true in zones.yaml; a deployment's
+# wave >= its environment's wave; the entry's catalog.status is in `status`; auto_rollback drives the stg rollback.
+stg:  {tier: staging,    wave: 1, auto_rollback: true,  status: [beta, stable, deprecated],
+       purpose: "test-first: canaries, beta apps, drills; may break"}
+shr:  {tier: production, wave: 2, auto_rollback: false, status: [stable, deprecated],
+       purpose: "shared platform services (k3s); CT 300 (CI) and CT 303 (OpenBao) are protected, have no spec and are never deployment targets"}
+int:  {tier: production, wave: 2, auto_rollback: false, status: [stable, deprecated],
+       purpose: "internal services for the home network (a trust zone, not a test tier)"}
+wifi: {tier: production, wave: 2, auto_rollback: false, status: [stable, deprecated],
+       purpose: "client DNS for wifi"}
+iot:  {tier: production, wave: 3, auto_rollback: false, status: [stable, deprecated],
+       purpose: "client DNS for IoT; wave 3 so a bad bump never hits both client DNS zones at once (cfg R3)"}
+dmz:  {tier: production, wave: 3, auto_rollback: false, status: [stable],
+       purpose: "internet-facing services; last wave"}
