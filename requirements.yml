@@ -1,0 +1,10 @@
+---
+# Ansible collections used by homelab-apps (catalog roles, playbooks/deploy.yml, scripts/render.py).
+# Installed on the apps runner at /opt/ansible-apps/collections (ANSIBLE_COLLECTIONS_PATH); renders run offline
+# in bwrap, so nothing is fetched at run time. Changing this file redeploys every deployment (ci-deploy.sh).
+#
+# Runtime requirement (cannot be expressed in this file): ansible-core >= 2.19
+# (runner venv /opt/ansible-apps/venv, currently 2.19.x). Raise it here and in the venv together.
+collections:
+  - name: community.general
+    version: ">=10.0.0"
