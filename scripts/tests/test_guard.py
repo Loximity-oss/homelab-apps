@@ -39,7 +39,7 @@ def run_main(argv):
     return rc, json.loads(buf.getvalue())
 
 
-class Guard(unittest.TestCase):
+class Fixture(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.TemporaryDirectory()
         r = self.infra = self.t.name
@@ -63,6 +63,8 @@ class Guard(unittest.TestCase):
     def chk(self, hosts=None, zone="wifi", ah=None, dl=None):
         return guard.check(zone, hosts or self.hosts, self.specs, self.prot, ah, dl, self.no_apps)
 
+
+class Guard(Fixture):
     def test_protected_loaded(self):
         self.assertEqual(self.prot["vmids"], {100, 300, 303})
         self.assertEqual(self.prot["templates"], (9000, 9199))
@@ -117,7 +119,7 @@ class Guard(unittest.TestCase):
             guard.load_protected(os.path.join(self.infra, "p2.yaml"))
 
 
-class NoApps(Guard):
+class NoApps(Fixture):
     """Faris's rule: VM 210 (hm1-dmz-app01) gets no apps (policy/no-apps.yaml)."""
 
     def dep_args(self, hosts, no_apps=None):
