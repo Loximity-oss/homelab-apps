@@ -1,0 +1,7 @@
+# Example stack rendered by catalog/_example/role to {{ app_example_dir }}/compose.yaml
+services:
+  app:
+    image: "{{ app_example_image }}"
+    restart: unless-stopped
+    ports:
+      - "{{ app_example_port }}:80"
