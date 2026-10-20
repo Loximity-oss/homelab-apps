@@ -1,0 +1,16 @@
+# Jinja filter/test allow-list for the PR lint gate (scripts/lint_gate.py). Class C.
+# Seeded from the roles' real use (proposal 5b-security, cfg 3.6-4). `attr` is never allowed.
+filters:
+  - b64decode
+  - trim
+  - length
+  - default
+  - combine
+  - to_json
+  - sort
+  - map
+  - select
+  - index
+tests:
+  - search
+  - defined

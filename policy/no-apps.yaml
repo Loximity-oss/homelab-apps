@@ -1,0 +1,6 @@
+# VMIDs that never get apps from homelab-apps (Faris's rule, review of PR #1, 2026-10-20).
+# Read by scripts/guard.py (--no-apps, default: this file). Always enforced: if this file is missing,
+# unparsable or `vmids` is empty, the guard refuses every deployment (exit 2, fail closed).
+# Changing this file is Class C (policy/**).
+vmids:
+  - 210   # hm1-dmz-app01: no apps
