@@ -1,0 +1,32 @@
+# Pattern for every app role: packages -> stack from files/ -> service -> healthcheck.
+- name: Docker engine
+  ansible.builtin.apt:
+    name: [docker.io, docker-compose-v2]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: App directory
+  ansible.builtin.file:
+    path: "{{ app_example_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Stack
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/compose.yaml.j2"
+    dest: "{{ app_example_dir }}/compose.yaml"
+    mode: "0640"
+  notify: restart app
+
+- name: Running
+  ansible.builtin.command: "docker compose -f {{ app_example_dir }}/compose.yaml up -d"
+  changed_when: false
+
+- name: Healthcheck
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_example_port }}/"
+  register: example_hc
+  retries: 10
+  delay: 3
+  until: example_hc.status == 200

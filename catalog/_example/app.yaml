@@ -1,0 +1,41 @@
+# Skeleton catalogue entry (compose-based). Copy catalog/_example to catalog/<app> and edit.
+# Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5. Not deployable: status example.
+name: _example
+owner: oc-cfg
+catalog:
+  status: example                # example | beta (stg only) | stable | deprecated
+  summary: Skeleton app (traefik/whoami in Docker Compose) to copy for new apps
+  role: app                      # role code(s) in standards naming/roles.yaml
+  pattern: single                # single | pair | cluster (+ count)
+  os: [ubuntu]
+  size: {type: vm, cores: 1, memory_mb: 1024, disk_gb: 8}
+  ports: [8080/tcp]
+  flows:
+    - {from: self-zone, to: self, ports: [8080/tcp]}
+    - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
+secrets: []                      # e.g. {path: "<zone>/secret/apps/example", keys: [password], by: role}
+version:
+  pin: "1.10.3"                  # container image tag
+  known:
+    "1.10.3": "image-tag-no-checksum"   # compose apps pin by image tag; binaries carry a sha256 here
+  source: dockerhub:traefik/whoami
+  url: "traefik/whoami:{version}"
+  vars: {version: app_example_version, url: app_example_image, sha256: app_example_sha256}
+  bump_class: B
+rollout:
+  serial: 1
+  order: sorted
+  stop_on_failure: true
+  health_between_hosts: true
+  groups: []
+health:                          # plain shell on the guest, exit 0 = healthy, no secrets, hard timeout
+  services: [docker]
+  command: "curl -fsS --max-time 5 http://127.0.0.1:8080/ >/dev/null"
+  timeout_s: 20
+reboot:
+  policy: single
+  timeout_s: 600
+probes:
+  - {name: http, module: http_2xx, port: 8080, path: /}
+tests: tests/l4.goss.yaml.j2
+drift: {in_l4: false}
