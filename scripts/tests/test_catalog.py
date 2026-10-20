@@ -33,6 +33,11 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(cat.hosts("adguard"), ["hm1-wifi-dns01", "hm1-wifi-dns02"])
         self.assertEqual(catalog.main(["--root", self.root, "validate"]), 0)
 
+    def test_k3s_hosts(self):
+        write(self.root, "catalog/k3s/app.yaml", "name: k3s\n")
+        write(self.root, "deployments/shr/k3s.yaml", "hosts: [hm1-shr-k3s01, hm1-shr-k3s02]\n")
+        self.assertEqual(catalog.load(self.root).errors, [])
+
     def test_unknown_app(self):
         write(self.root, "deployments/shr/k3s.yaml", "hosts: [hm1-shr-k3s01]\n")
         cat = catalog.load(self.root)

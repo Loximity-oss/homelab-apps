@@ -24,7 +24,7 @@ import sys
 import yaml
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-HOST_RE = re.compile(r"^hm1-[a-z]{2,4}-[a-z]{2,8}[0-9]{2}$")
+HOST_RE = re.compile(r"^hm1-[a-z]{2,4}-[a-z][a-z0-9]{1,7}[0-9]{2}$")
 
 
 class Catalog:
