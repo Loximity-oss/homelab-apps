@@ -1,0 +1,12 @@
+# L4 app checks for the example app on {{ inventory_hostname }}. Read-only, loopback only, no credentials.
+service:
+  docker:
+    enabled: true
+    running: true
+command:
+  app-example-listen:
+    exec: 'n=$(ss -Hltn "sport = :{{ app_example_port | default(8080) }}" | wc -l); echo "tcp/{{ app_example_port | default(8080) }} listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-example-http:
+    exec: 'c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:{{ app_example_port | default(8080) }}/); echo "HTTP $c"; test "$c" = 200'
+    exit-status: 0
