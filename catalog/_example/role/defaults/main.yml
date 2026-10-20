@@ -1,0 +1,5 @@
+app_example_dir: /opt/example
+app_example_version: "1.10.3"
+app_example_image: "traefik/whoami:1.10.3"
+app_example_sha256: ""
+app_example_port: 8080
