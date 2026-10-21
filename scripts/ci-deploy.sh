@@ -171,7 +171,9 @@ run_play() {   # wave app zone path hosts_csv
   rid="$(date +%s)$$$((RANDOM % 1000))"; RD="/run/devops/apps/$rid"
   install -d -m 2750 -g runner-apps-play "$RD"
   umask 027
-  install -d "$RD/src" "$RD/src/apps" "$RD/src/infra"
+  # -m 2750 keeps setgid: a plain install -d chmods to 0755, which clears the inherited setgid bit, so src/apps and
+  # src/infra got runner-apps's own group and apps-play-run refused the run dir (deploy run 593, first real deployments).
+  install -d -m 2750 "$RD/src" "$RD/src/apps" "$RD/src/infra"
   git -C "$BASE" archive --format=tar "$SHA" | tar -x -C "$RD/src/apps"     # no .git; a symlink makes the wrapper refuse
   git -C "$INFRA" archive --format=tar HEAD | tar -x -C "$RD/src/infra"
   tr ',' '\n' <<<"$hosts" > "$RD/hosts"
