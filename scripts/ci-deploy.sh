@@ -333,7 +333,9 @@ for ((i = 0; i < NW; i++)); do
   done < <(pj "[print('\t'.join([x['app'], x['zone'], x['path'], ','.join(x['hosts']), str(x['auto_rollback'])])) for x in d['waves'][$i]['deployments']]")
   [ $FAILED -eq 0 ] || { note "- ⛔ wave $WAVE failed: later waves not started"; break; }
   if [ "$APPS_MODE" = apply ]; then   # L4 of this wave before the next one (locks are held by this run)
-    if ! APPS_LOCKS_HELD=1 HOSTS="$WHOSTS" bash "$BASE/scripts/ci-verify.sh" > "$W/l4.txt" 2>&1; then
+    # EVENT=deploy: without it ci-verify.sh inherits our EVENT (push = refused; workflow_dispatch = APPS_LOCKS_HELD
+    # forced to 0, so the L4 would wait LOCK_WAIT on the locks this run holds)
+    if ! EVENT=deploy APPS_LOCKS_HELD=1 HOSTS="$WHOSTS" bash "$BASE/scripts/ci-verify.sh" > "$W/l4.txt" 2>&1; then
       note "- ❌ L4 after wave $WAVE failed: later waves not started"; note '```'; tail -30 "$W/l4.txt" | tr -d '`' >> "$REPORT"; note '```'
       FAILED=1; break
     fi
