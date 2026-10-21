@@ -5,7 +5,7 @@
 # deployments, takes ALL host locks in one lock_hosts call (held for the whole run), and per wave: pre-deploy
 # snapshots (apply only), then once per app play: run dir /run/devops/apps/<run-id>/ (2750 setgid, group
 # runner-apps-play, umask 027), src/ copies without .git, inventory.yml, hosts, env, a child token minted with an
-# explicit -ttl (apply only; check mode writes an empty token file), an ssh-agent holding the ci-apps key, the deploy
+# explicit -ttl (apply only; check mode writes an empty token file; verify writes none), an ssh-agent holding the ci-apps key, the deploy
 # guard, then `sudo /usr/local/sbin/apps-play-run <run-id>` (exit 2 = refused, stderr names the file). Class C.
 #
 # Entry point:  scripts/ci-deploy.sh        (no arguments; environment set by .gitea/workflows/deploy.yml)
@@ -18,7 +18,13 @@
 #   APPS                   dispatch only, optional: csv of catalogue entry names
 #   INFRA_PR               dispatch only, optional: infra PR number; the report is commented there, and its hosts'
 #                          SSH host keys are re-learned (the infra apply created/replaced them)
-#   APPS_MODE              check (default) | apply. Set literally in deploy.yml, never from dispatch inputs.
+#   APPS_MODE              check (default) | apply | verify. check/apply are set literally in deploy.yml, never from
+#                          dispatch inputs; verify only via scripts/ci-verify.sh: L4 = playbooks/verify.yml through the
+#                          wrapper (not check mode), no child token and NO token file in the run dir (the wrapper refuses
+#                          one), no snapshot, no wave delay; per host issue "app-verify: <app>/<host>" (label verify)
+#                          upserted on failure, closed when green
+#   APPS_LOCKS_HELD        verify only: 1 = the calling ci-deploy.sh (L4 between apply waves) holds these hosts' locks, so
+#                          lock_hosts is skipped (a second flock would wait on our own parent). Forced to 0 otherwise.
 #   APPS_TIMEOUT           s per app play, 60..14400 (default 3600)    APPS_TOKEN_TTL  child token TTL s (default 1800)
 #   WAVE_DELAY             s between waves in apply mode (default 3600; 0 in check mode)
 #   APPS_SSH_KEY           private key of ci-apps (default ~/.ssh/ci-apps)
@@ -34,7 +40,10 @@ refuse() { echo "ci-deploy: refused: $*" >&2; exit 1; }
 [ "${GITHUB_REF:-}" = refs/heads/main ] || refuse "ref '${GITHUB_REF:-?}' is not refs/heads/main"
 [[ $SHA =~ ^[0-9a-f]{40}$ ]] || refuse "bad SHA"
 [[ $EVENT =~ ^(push|workflow_dispatch)$ ]] || refuse "event '$EVENT'"
-[[ $APPS_MODE =~ ^(check|apply)$ ]] || refuse "APPS_MODE '$APPS_MODE'"
+[[ $APPS_MODE =~ ^(check|apply|verify)$ ]] || refuse "APPS_MODE '$APPS_MODE'"
+APPS_LOCKS_HELD=${APPS_LOCKS_HELD:-0}
+[[ $APPS_LOCKS_HELD =~ ^[01]$ ]] || refuse "APPS_LOCKS_HELD '$APPS_LOCKS_HELD'"
+[ "$APPS_MODE" = verify ] || APPS_LOCKS_HELD=0     # only an L4 run called by a deploy that holds the locks skips them
 [[ $HOSTS =~ ^[a-z0-9,-]*$ ]] && [[ $APPS =~ ^[a-z0-9,_-]*$ ]] && [[ $INFRA_PR =~ ^[0-9]*$ ]] && [[ $BEFORE =~ ^([0-9a-f]{40})?$ ]] || refuse "bad dispatch input"
 [[ $APPS_TIMEOUT =~ ^[0-9]{2,5}$ ]] && [ "$APPS_TIMEOUT" -ge 60 ] && [ "$APPS_TIMEOUT" -le 14400 ] || refuse "APPS_TIMEOUT 60..14400"
 [[ $APPS_TOKEN_TTL =~ ^[0-9]{2,5}$ ]] || refuse "APPS_TOKEN_TTL"
@@ -68,7 +77,7 @@ clone homelab/homelab-infra "$INFRA" "$GITEA_API_TOKEN" || refuse "infra clone f
 clone homelab/homelab-standards "$STD" "$GITEA_API_TOKEN" || refuse "standards clone failed: protected.yaml unavailable (fail closed)"
 source "$INFRA/scripts/ci-lib.sh"                 # lock_hosts / unlock_hosts, gitea.py (infra main, read-only)
 export BAO_CACERT=/etc/ssl/devops/openbao-ca.crt LC_ALL=C.UTF-8
-LOCK_WORKFLOW=deploy
+if [ "$APPS_MODE" = verify ]; then LOCK_WORKFLOW=verify; else LOCK_WORKFLOW=deploy; fi
 INFRA_SHA=$(git -C "$INFRA" rev-parse HEAD)
 note "## homelab-apps deploy ($APPS_MODE) \`${SHA:0:8}\` (infra \`${INFRA_SHA:0:8}\`, $EVENT)"
 
@@ -143,8 +152,11 @@ fi
 ALL_HOSTS=$(pj 'print(",".join(sorted({h for w in d["waves"] for x in w["deployments"] for h in x["hosts"]})))')
 if [ -z "$ALL_HOSTS" ]; then note "- Nothing to deploy."; cat "$REPORT"; exit 0; fi
 
-# ---- host locks: every host of the run, one call, held until exit (proposal 2.3)
-if lock_hosts "$ALL_HOSTS"; then
+# ---- host locks: every host of the run, one call, held until exit (proposal 2.3). verify called between apply waves
+# (APPS_LOCKS_HELD=1): the parent deploy already holds these hosts' locks; none are taken or released here.
+if [ "$APPS_LOCKS_HELD" = 1 ]; then
+  note "- 🔐 Host locks: held by the calling deploy run ($ALL_HOSTS)"
+elif lock_hosts "$ALL_HOSTS"; then
   note "- 🔐 Host locks: $(locked_hosts)"; for n in "${LOCK_NOTES[@]}"; do note "  - ⚠️ $n"; done
 else
   note "- ❌ **Host locks** not acquired; nothing deployed (issue \`pipeline: lock wait timeout <host>\` names the holder)"
@@ -163,6 +175,31 @@ for h in ${ALL_HOSTS//,/ }; do
     else note "- ⚠️ could not scan the SSH host key of $h ($ip)"; fi
   fi
 done
+
+# ---- verify mode: one issue per failing host, "app-verify: <app>/<host>" (label verify); closed when the host is green.
+# Reads the Ansible recap line of each host; never fails the run (a Gitea error is only noted in the report).
+verify_issues() {   # app path hosts_csv log rc
+  local app=$1 path=$2 hosts=$3 log=$4 rc=$5 h line t url=""
+  [ -n "${GITHUB_RUN_NUMBER:-}" ] && url="${SERVER%/}/$REPO/actions/runs/$GITHUB_RUN_NUMBER"
+  for h in ${hosts//,/ }; do
+    line=$(grep -E "^$h +: ok=" "$log" | tail -1 | sed 's/  */ /g' | tr -d '`' || true)
+    if [ -n "$line" ] && [[ $line =~ unreachable=0( |$) ]] && [[ $line =~ failed=0( |$) ]]; then
+      python3 "$INFRA/scripts/gitea.py" issue-close "app-verify: $app/$h" "L4 green on apps \`${SHA:0:8}\` (${url:-no run link})." >/dev/null 2>&1 \
+        || note "  - ⚠️ could not close issue app-verify: $app/$h"
+    else
+      t=$(mktemp -p "$W")
+      { echo "**L4 failed** for \`$app\` on \`$h\` (\`$path\`, apps \`${SHA:0:8}\`, infra \`${INFRA_SHA:0:8}\`, play rc=$rc)."
+        [ -n "$url" ] && echo "Run: $url"
+        echo; echo "Recap: ${line:-no recap line for $h (play did not reach it)}"; echo
+        echo '```'; { grep -F -- "$h" "$log" || true; } | tail -40 | tr -d '`'; echo '```'
+      } > "$t" || true
+      python3 "$INFRA/scripts/gitea.py" issue-upsert "app-verify: $app/$h" verify "$t" >/dev/null 2>&1 \
+        || note "  - ⚠️ could not open/comment issue app-verify: $app/$h"
+      rm -f "$t"
+    fi
+  done
+  return 0
+}
 
 # ---- one app play (one deployment, its selected hosts)
 FAILED=0
@@ -246,7 +283,8 @@ PY
       CHILD=""; note "  - ❌ $path: child token apps-$app not minted: $(tail -1 "$W/token.err" | tr -d '`')"; end_play; return 1
     fi
   fi
-  printf '%s' "$CHILD" > "$RD/token"
+  # verify: NO token file at all (apps-play-run refuses a verify run dir that has one, exit 2; infra #147)
+  [ "$APPS_MODE" = verify ] || printf '%s' "$CHILD" > "$RD/token"
   printf 'APPS_APP=%s\nAPPS_MODE=%s\nAPPS_TIMEOUT=%s\nAPPS_WAVE=%s\nBAO_ZONE_MODE=namespace\nANSIBLE_FORCE_COLOR=0\nANSIBLE_STDOUT_CALLBACK=default\n' \
     "$app" "$APPS_MODE" "$APPS_TIMEOUT" "$wave" > "$RD/env"
   # ssh-agent for this play only; -t = play timeout, so a missed cleanup still expires the key
@@ -260,6 +298,7 @@ PY
     2) note "  - ❌ $path: **apps-play-run refused** the run dir"; note '```'; grep 'refused' "$W/play-$rid.log" | tail -3 | tr -d '`' >> "$REPORT"; note '```' ;;
     *) note "  - ❌ $path ($hosts): play failed rc=$rc"; note '```'; tail -40 "$W/play-$rid.log" | tr -d '`' >> "$REPORT"; note '```' ;;
   esac
+  if [ "$APPS_MODE" = verify ] && [ "$rc" != 2 ]; then verify_issues "$app" "$path" "$hosts" "$W/play-$rid.log" "$rc"; fi
   cat "$W/play-$rid.log"
   end_play
   return $(( rc == 0 ? 0 : 1 ))
@@ -280,7 +319,8 @@ for ((i = 0; i < NW; i++)); do
     fi
     note "- 📸 Snapshot \`$SNAP\`: $WHOSTS"
   else
-    note "- check mode: no snapshot, no child token, no changes expected"
+    if [ "$APPS_MODE" = verify ]; then note "- verify mode (L4, playbooks/verify.yml): no snapshot, no child token, no token file"
+    else note "- check mode: no snapshot, no child token, no changes expected"; fi
   fi
   while IFS=$'\t' read -r app zone path hosts rb; do
     if ! run_play "$WAVE" "$app" "$zone" "$path" "$hosts"; then
