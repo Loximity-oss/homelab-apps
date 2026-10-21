@@ -16,7 +16,7 @@ vrrp_instance K3S_API {
   state BACKUP
   interface {{ ansible_default_ipv4.interface }}
   virtual_router_id {{ svc_k3s_vrrp_router_id }}
-  priority {{ 150 - 10 * servers.index(inventory_hostname) }}
+  priority {{ 150 - 10 * (servers.index(inventory_hostname) if inventory_hostname in servers else 0) }}
   advert_int 1
   unicast_src_ip {{ ansible_host }}
   unicast_peer {
