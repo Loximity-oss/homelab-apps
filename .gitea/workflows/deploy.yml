@@ -1,7 +1,8 @@
 name: deploy
 # Deploys catalogue entries to the hosts in deployments/, from main only (scripts/ci-deploy.sh refuses any other ref
-# and checks out main's sha). Until cutover (migration step 10) infra alone deploys AdGuard/k3s and this runs in
-# CHECK mode: APPS_MODE is set here, literally, never from an input. Switching to apply is its own Class C PR.
+# and checks out main's sha). Since cutover (migration step 10(b), infra #127) this runs in APPLY mode: pre-deploy_
+# snapshots, child token per app, waves with WAVE_DELAY, L4 after each wave. APPS_MODE is set here, literally, never
+# from an input; going back to check mode (revert order step 1) is its own Class C PR.
 # Dispatch inputs (infra apply, Faris) are untrusted: passed only as env, intersected with deployments and specs.
 on:
   push:
@@ -26,9 +27,9 @@ jobs:
     runs-on: host-apps
     timeout-minutes: 240 # > host lock wait (60 min) + the longest wave set (proposal 2.3)
     steps:
-      - name: deploy (check mode)
+      - name: deploy (apply mode)
         env:
-          APPS_MODE: check
+          APPS_MODE: apply
           GIT_TOKEN: ${{ gitea.token }}
           SERVER: ${{ gitea.server_url }}
           REPO: ${{ gitea.repository }}
