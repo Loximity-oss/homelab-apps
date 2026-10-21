@@ -1,0 +1,19 @@
+# k3s HA cluster in shr (migration step 8, infra #127): 3 control nodes (embedded etcd) + 2 workers, keepalived API VIP.
+# Wave 2 per environments.yaml (shr). VM 210 (hm1-dmz-app01) is in no deployment and is never touched.
+# Instance values are plain data and equal the live cluster / homelab-infra svc_k3s defaults (checked on 310:
+# keepalived virtual_router_id 70, VIP 192.168.70.200/24, k3s v1.36.5+k3s1). No infra group_vars override them.
+# Control nodes sort before workers (k3sc < k3sw); the first sorted control node (k3sc01) runs --cluster-init.
+app: k3s
+zone: shr
+hosts: [hm1-shr-k3sc01, hm1-shr-k3sc02, hm1-shr-k3sc03, hm1-shr-k3sw01, hm1-shr-k3sw02]
+version: catalog
+pin_until: null
+wave: 2
+pattern: cluster
+vars:
+  svc_k3s_api_vip: 192.168.70.200
+  svc_k3s_vip_prefix: 24
+  svc_k3s_vrrp_router_id: 70
+  svc_k3s_server_taints:
+    - CriticalAddonsOnly=true:NoExecute
+host_vars: {}
