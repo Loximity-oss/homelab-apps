@@ -6,7 +6,8 @@ http:
   session_ttl: 720h
 users:
   - name: {{ app_adguard_admin_user | to_json }}
-    password: {{ _adguard_admin_hash | to_json }}
+    # default(): the hash is a deploy-time fact; the offline PR render has none (the role always sets it before this renders)
+    password: {{ (_adguard_admin_hash | default('<<hash:deploy-time>>')) | to_json }}
 dns:
   bind_hosts: {{ app_adguard_bind_hosts | to_json }}
   port: {{ app_adguard_dns_port }}
