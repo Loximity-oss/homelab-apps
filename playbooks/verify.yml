@@ -208,7 +208,7 @@
         path: /usr/local/bin/goss
       register: apps_goss
 
-    - name: L4 test input (the only write: root-only rendered copy of the catalogue file)
+    - name: L4 test input, the only write (root-only rendered copy of the catalogue file)
       ansible.builtin.template:
         src: "{{ apps_root }}/catalog/{{ apps_run_app }}/{{ apps_entry.tests }}"
         dest: "{{ apps_l4_file }}"
