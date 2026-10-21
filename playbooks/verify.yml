@@ -1,0 +1,259 @@
+---
+# playbooks/verify.yml - READ-ONLY verification of ONE deployment, its selected hosts. Class C (playbooks/**).
+# Proposal: infra docs/proposals/homelab-apps/4-verification.md (4.2 L4, 4.7 loop), infra #127 step 8 (verify mode).
+# Run by `apps-play-run` (CT 300, as runner-apps-play) when the run dir has APPS_MODE=verify, from src/apps, NOT in check mode:
+#   ansible-playbook -i <run>/inventory.yml --limit <hosts> -e apps_run_app=<app> playbooks/verify.yml
+# Same run-dir contract as deploy.yml, except: NO child token, NO APPS_BAO_TOKEN_FILE. This playbook has no OpenBao access
+# of any kind: it includes no role, runs no bao_create_secret and looks nothing up. Secrets are never needed and never rendered.
+#
+# What it does per host, in this order:
+#   1. Guard (controller only, no SSH): same inputs/identity/protected checks as deploy.yml, catalogue version variables
+#      set so the L4 template renders with the same values a deploy would use.
+#   2. Health of the catalogue entry (`health.services`, `health.command`), exactly as deploy.yml runs it, once, no retries.
+#   3. L4: renders the entry's `tests` file (catalog/<app>/tests/l4.goss.yaml.j2) and runs it with the Goss binary that the
+#      infra L3 verification already installed (/usr/local/bin/goss). App drift is part of L4 (`drift.in_l4`).
+# It changes nothing on the guest. The one write is the rendered test input /etc/hm1/goss/l4-<app>.yaml (root, 0640),
+# the same place and kind of file as homelab-infra ansible/roles/verify. It installs nothing: a missing Goss is a failure.
+# Every L4 command must stay read-only (docs/verification.md).
+# Failing hosts fail the play (rc != 0 for ci-deploy.sh, which opens/closes the `app-verify: <app>/<host>` issue).
+
+- name: Verify guard and catalogue resolution (no host is contacted)
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    apps_root: "{{ playbook_dir | dirname }}"
+    apps_infra_root: "{{ playbook_dir | dirname | dirname }}/infra"
+    apps_tools_root: "{{ playbook_dir | dirname | dirname }}"
+  tasks:
+    - name: Pipeline inputs are present and well formed, and this is a real (not check mode) run without OpenBao
+      ansible.builtin.assert:
+        that:
+          - ansible_version.full is version('2.19.0', '>=')
+          - not ansible_check_mode
+          - apps_run_app is defined
+          - apps_deployment is defined
+          - apps_deployment_zone is defined
+          - apps_deployment_app is defined
+          - apps_run_app is match('^[a-z][a-z0-9]*(-[a-z0-9]+)*$')
+          - apps_deployment_zone is match('^(dmz|shr|int|stg|wifi|iot)$')
+          - apps_deployment_app == apps_run_app
+          - apps_deployment == 'deployments/' ~ apps_deployment_zone ~ '/' ~ apps_deployment_app ~ '.yaml'
+          - lookup('ansible.builtin.env', 'APPS_BAO_TOKEN_FILE') | length == 0
+        fail_msg: >-
+          verify guard: inputs missing or malformed (ansible-core >= 2.19, apps_run_app, apps_deployment*), check mode
+          (a check-mode verify proves nothing), or APPS_BAO_TOKEN_FILE is set (verify gets no OpenBao access)
+
+    - name: Load the deployment, the catalogue entry, the environment list and the no-apps list
+      ansible.builtin.include_vars:
+        file: "{{ item.file }}"
+        name: "{{ item.name }}"
+      loop:
+        - {file: "{{ apps_root }}/{{ apps_deployment }}", name: apps_dep}
+        - {file: "{{ apps_root }}/catalog/{{ apps_run_app }}/app.yaml", name: apps_entry}
+        - {file: "{{ apps_root }}/environments.yaml", name: apps_envs}
+        - {file: "{{ apps_root }}/policy/no-apps.yaml", name: apps_no_apps}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Deployment, entry and environment agree, and the entry has something to verify
+      ansible.builtin.assert:
+        that:
+          - apps_dep.app == apps_run_app
+          - (apps_dep.zone | default(apps_deployment_zone)) == apps_deployment_zone
+          - apps_entry.name == apps_run_app
+          - apps_envs[apps_deployment_zone] is defined
+          - apps_entry.catalog.status in apps_envs[apps_deployment_zone].status
+          - ansible_play_hosts_all | difference(apps_dep.hosts) | length == 0
+          - (apps_no_apps.vmids | default([])) | length > 0
+          - apps_entry.health is defined
+          - apps_entry.health.timeout_s | int > 0
+          - apps_entry.health.timeout_s | int <= 300
+          - apps_entry.tests is defined
+          - apps_entry.tests is match('^tests/[A-Za-z0-9._-]+[.]goss[.]yaml[.]j2$')
+        fail_msg: "verify guard: deployment/entry/environment mismatch, or the entry has no health and no tests file"
+
+    - name: Load the infra guest spec of this host (it must be in the deployment's zone stack)
+      ansible.builtin.include_vars:
+        file: "{{ apps_infra_root }}/terraform/stacks/hm1/{{ apps_deployment_zone }}/guests/{{ inventory_hostname }}.yaml"
+        name: apps_spec
+
+    - name: Look for a protected.yaml copy supplied by the pipeline (src/standards/protected.yaml)
+      ansible.builtin.set_fact:
+        apps_protected_file: "{{ query('ansible.builtin.first_found', [apps_tools_root ~ '/standards/protected.yaml'], skip=True) }}"
+
+    - name: Load protected.yaml
+      ansible.builtin.include_vars:
+        file: "{{ apps_protected_file | first }}"
+        name: apps_protected
+      when: apps_protected_file | length > 0
+
+    - name: protected.yaml not supplied
+      ansible.builtin.debug:
+        msg: >-
+          verify guard: no protected.yaml in the run dir; protected VMIDs, templates and subnets are enforced only by
+          ci-deploy.sh (scripts/guard.py) and by a host having to exist in the infra specs (protected guests have none)
+      when: apps_protected_file | length == 0
+
+    - name: Host identity matches the infra spec and the deployment
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname is match('^hm1-(dmz|shr|int|stg|wifi|iot)-[a-z][a-z0-9]*[0-9]{2}$')
+          - inventory_hostname.split('-')[1] == apps_deployment_zone
+          - (apps_spec.hostname | default(inventory_hostname)) == inventory_hostname
+          - inventory_hostname in apps_dep.hosts
+          - zone == apps_deployment_zone
+          - vmid | int == apps_spec.vmid | int
+          - role == apps_spec.role
+          - ansible_host == apps_spec.ip | string | split('/') | first
+          - ansible_host is not match('^(127[.]|0[.]0[.]0[.]0|localhost|::1)')
+          - (ansible_connection | default('ssh')) == 'ssh'
+          - ('zone_' ~ apps_deployment_zone) in group_names
+          - ('role_' ~ apps_spec.role) in group_names
+          - ('deployment_' ~ ((apps_deployment_zone ~ '_' ~ apps_deployment_app) | regex_replace('[^a-z0-9_]', '_'))) in group_names
+          - apps_spec.role in ([apps_entry.catalog.role] if apps_entry.catalog.role is string else apps_entry.catalog.role)
+          - apps_spec.vmid | int not in (apps_no_apps.vmids | map('int') | list)
+        fail_msg: "verify guard: {{ inventory_hostname }} does not match its infra spec, zone, deployment or the no-apps list"
+
+    - name: Host is not a protected guest or a template (when protected.yaml was supplied)
+      ansible.builtin.assert:
+        that:
+          - (apps_protected.vmids | default({})) | length > 0
+          - apps_spec.vmid | int not in (apps_protected.vmids | list | map('int') | list)
+          - not ((apps_protected.templates | default([0, -1]))[0] | int <= apps_spec.vmid | int <= (apps_protected.templates | default([0, -1]))[1] | int)
+        fail_msg: "verify guard: {{ inventory_hostname }} (VMID {{ apps_spec.vmid }}) is protected or in the template range"
+      when: apps_protected_file | length > 0
+
+    # The version variables are what a deploy would set, so the L4 template renders with the deployed values.
+    - name: Resolve the version (deployment pin or the catalogue pin)
+      ansible.builtin.set_fact:
+        apps_pin: >-
+          {{ (apps_entry.version.pin if (apps_dep.version | default('catalog', true)) == 'catalog'
+          else apps_dep.version) | string }}
+
+    - name: The pin is known, and a deployment pin carries pin_until
+      ansible.builtin.assert:
+        that:
+          - apps_pin in (apps_entry.version.known | default({}) | list | map('string') | list)
+          - (apps_dep.version | default('catalog', true)) == 'catalog' or apps_dep.pin_until | default(none) is not none
+          - (apps_entry.version.vars | default({})) | length > 0
+        fail_msg: "verify guard: version {{ apps_pin }} is not in version.known (or a pin has no pin_until, or version.vars is empty)"
+
+    - name: Role variables named by version.vars are well formed and not set by the deployment
+      ansible.builtin.assert:
+        that:
+          - item.key in ['version', 'url', 'sha256']
+          - item.value is string
+          - item.value is match('^(app|svc)_' ~ (apps_run_app | replace('-', '_')) ~ '_[a-z0-9_]+$')
+          - vars[item.value] is not defined
+        fail_msg: >-
+          verify guard: version.vars.{{ item.key }} must name a role variable (app_|svc_)<app>_<name> that the
+          deployment does not set itself
+      loop: "{{ (apps_entry.version.vars | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Set the version variables of the role
+      ansible.builtin.set_fact:
+        "{{ item.value }}": "{{ {'version': apps_pin, 'url': apps_url, 'sha256': apps_sha}[item.key] }}"
+      vars:
+        apps_url: "{{ apps_entry.version.url | default('') | replace('{version}', apps_pin) }}"
+        apps_sha: "{{ apps_entry.version.known[apps_pin] | default('') }}"
+      loop: "{{ (apps_entry.version.vars | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Guard passed
+      ansible.builtin.set_fact:
+        apps_guard_ok: true
+
+- name: Verify the catalogue entry, read-only
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  # A failing host must not hide the others: every host is verified and reported; the play still ends red.
+  any_errors_fatal: false
+  vars:
+    apps_root: "{{ playbook_dir | dirname }}"
+    apps_l4_file: "/etc/hm1/goss/l4-{{ apps_run_app }}.yaml"
+  pre_tasks:
+    - name: Refuse a host that did not pass the guard
+      ansible.builtin.assert:
+        that:
+          - apps_guard_ok | default(false) | bool
+          - apps_run_app == apps_deployment_app
+        fail_msg: "verify guard: {{ inventory_hostname }} did not pass the guard play"
+
+  tasks:
+    # ---- Health (deploy.yml's gate, once, no retries: verify reports the state it finds)
+    - name: Health - services are active
+      ansible.builtin.command:
+        argv: ["systemctl", "is-active", "--quiet", "{{ item }}"]
+      register: apps_health_svc
+      changed_when: false
+      failed_when: false
+      loop: "{{ apps_entry.health.services | default([]) }}"
+
+    - name: Health - command (exit 0 = healthy, hard timeout)
+      ansible.builtin.command:
+        argv: ["timeout", "{{ apps_entry.health.timeout_s | int }}", "bash", "-c", "{{ apps_entry.health.command }}"]
+      register: apps_health_cmd
+      changed_when: false
+      failed_when: false
+      when: apps_entry.health.command is defined
+
+    # ---- L4 (Goss, from the catalogue entry)
+    - name: Goss is on the guest (installed by the infra L3 verification; verify installs nothing)
+      ansible.builtin.stat:
+        path: /usr/local/bin/goss
+      register: apps_goss
+
+    - name: L4 test input, the only write (root-only rendered copy of the catalogue file)
+      ansible.builtin.template:
+        src: "{{ apps_root }}/catalog/{{ apps_run_app }}/{{ apps_entry.tests }}"
+        dest: "{{ apps_l4_file }}"
+        owner: root
+        group: root
+        mode: "0640"
+      register: apps_l4_render
+      failed_when: false
+      when: apps_goss.stat.exists and apps_goss.stat.executable
+
+    - name: Run L4
+      ansible.builtin.command:
+        argv: ["/usr/local/bin/goss", "-g", "{{ apps_l4_file }}", "validate", "--format", "documentation", "--no-color"]
+      register: apps_l4
+      changed_when: false
+      failed_when: false
+      when:
+        - apps_goss.stat.exists and apps_goss.stat.executable
+        - apps_l4_render is succeeded
+
+    # ---- Report (one summary line per host; failed Goss lines are shown, everything else stays in the register)
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          APP-VERIFY {{ inventory_hostname }} app={{ apps_run_app }}
+          health_services={{ 'ok' if (apps_health_svc.results | default([]) | selectattr('rc', 'ne', 0) | list | length == 0) else 'FAIL' }}
+          health_command={{ ('ok' if apps_health_cmd.rc == 0 else 'FAIL rc=' ~ apps_health_cmd.rc) if apps_health_cmd.rc is defined else 'none' }}
+          l4={{ ('ok' if apps_l4.rc == 0 else 'FAIL rc=' ~ apps_l4.rc) if apps_l4.rc is defined else 'not run' }}
+
+    - name: L4 failed checks
+      ansible.builtin.debug:
+        msg: "{{ apps_l4.stdout_lines | select('search', 'Failed|Count:|Expected|Actual') | list }}"
+      when: apps_l4.rc is defined and apps_l4.rc != 0
+
+    - name: Verdict (a failing host ends the run red; ci-deploy.sh opens the app-verify issue)
+      ansible.builtin.assert:
+        that:
+          - apps_health_svc.results | default([]) | selectattr('rc', 'ne', 0) | list | length == 0
+          - apps_health_cmd.rc | default(0) == 0
+          - apps_goss.stat.exists and apps_goss.stat.executable
+          - apps_l4_render is succeeded
+          - apps_l4.rc is defined and apps_l4.rc == 0
+        fail_msg: >-
+          verify failed on {{ inventory_hostname }}: health services {{ apps_health_svc.results | default([]) | selectattr('rc', 'ne', 0) | map(attribute='item') | list }},
+          health command rc={{ apps_health_cmd.rc | default('n/a') }},
+          goss {{ 'present' if (apps_goss.stat.exists and apps_goss.stat.executable) else 'MISSING on the guest (run the infra L3 verification first)' }},
+          L4 rc={{ apps_l4.rc | default('not run') }}
+        success_msg: "verify passed on {{ inventory_hostname }}"
