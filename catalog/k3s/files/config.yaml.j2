@@ -1,0 +1,27 @@
+# Managed by Ansible (role svc_k3s). Do not edit on the guest.
+node-name: {{ inventory_hostname }}
+node-ip: {{ ansible_host }}
+{% if svc_k3s_node_type == 'server' %}
+write-kubeconfig-mode: "0600"
+secrets-encryption: true
+agent-token: "{{ _k3s_agent_token }}"
+tls-san:
+  - {{ svc_k3s_api_vip }}
+  - {{ ansible_host }}
+  - {{ inventory_hostname }}
+node-taint:
+{% for t in svc_k3s_server_taints %}
+  - "{{ t }}"
+{% endfor %}
+etcd-snapshot-schedule-cron: "{{ svc_k3s_etcd_snapshot_cron }}"
+etcd-snapshot-retention: {{ svc_k3s_etcd_snapshot_retention }}
+{% if inventory_hostname == svc_k3s_init_host %}
+cluster-init: true
+{% else %}
+server: https://{{ hostvars[svc_k3s_init_host].ansible_host }}:{{ svc_k3s_api_port }}
+token: "{{ _k3s_token }}"
+{% endif %}
+{% else %}
+server: https://{{ svc_k3s_api_vip }}:{{ svc_k3s_api_port }}
+token: "{{ _k3s_agent_token }}"
+{% endif %}

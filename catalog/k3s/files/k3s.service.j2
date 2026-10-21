@@ -1,0 +1,32 @@
+# Managed by Ansible (role svc_k3s)
+[Unit]
+Description=Lightweight Kubernetes ({{ svc_k3s_node_type }})
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type={{ 'notify' if svc_k3s_node_type == 'server' else 'exec' }}
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+{% if svc_k3s_node_type == 'server' %}
+# Every control node: k3s rewrites server/cred/passwd itself, so it can be newer than the datastore bootstrap record and
+# the next start dies with 'cred/passwd newer than datastore and could cause a cluster outage' (seen on all three
+# servers after the 2026-10-17 host reboot, including the init server). Drop it before every start (boot, crash restart,
+# role restart); k3s recreates it from the datastore (documented remedy). '-' = a missing file is not an error.
+# Trade-off: a real local-vs-datastore divergence is no longer reported. See docs/apps/k3s-runbook.md.
+ExecStartPre=-/bin/rm -f /var/lib/rancher/k3s/server/cred/passwd
+{% endif %}
+ExecStart=/usr/local/bin/k3s {{ svc_k3s_node_type }}
+
+[Install]
+WantedBy=multi-user.target

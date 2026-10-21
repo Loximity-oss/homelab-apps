@@ -1,0 +1,258 @@
+# k3s node (server or agent), native binary, no get.k3s.io script. Derived from infra ansible/roles/svc_k3s.
+# Order: kernel prerequisites -> was-running check -> binary -> (server: keepalived VIP) -> tokens -> config -> unit ->
+# (joining server: clean start state) -> start -> restart only if it was already running -> (first control node:
+# token escrow). The healthchecks (API /readyz, node Ready) are `health` in app.yaml, run by playbooks/deploy.yml after
+# each host, before the next one starts.
+# Check mode (lint gate 5.1): read-only tasks carry check_mode: false + changed_when: false. Known check-mode exceptions:
+# the `creates:`-gated `openssl rand` (skipped when the file exists) and the --version-gated download block.
+- name: Packages
+  ansible.builtin.apt:
+    name: "{{ ['iptables', 'conntrack', 'curl'] + (['keepalived'] if svc_k3s_node_type == 'server' else []) }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+
+# ---- Kernel prerequisites
+- name: Kernel modules loaded at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k3s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: "0644"
+
+- name: Kernel modules loaded now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Sysctls (forwarding, bridge netfilter)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-k3s.conf
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv6.conf.all.forwarding = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+    mode: "0644"
+  notify: reload sysctl
+
+- name: Apply sysctls before k3s starts
+  ansible.builtin.meta: flush_handlers
+
+# kubelet refuses to start with swap on
+- name: Active swap
+  ansible.builtin.command: swapon --show --noheadings
+  register: _k3s_swap
+  changed_when: false
+  check_mode: false
+
+- name: Swap off now
+  ansible.builtin.command: swapoff -a
+  when: _k3s_swap.stdout | trim | length > 0
+
+- name: Swap off at boot (comment fstab swap entries)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\n]+\s+swap\s+.*)$'
+    replace: '# \1'
+
+# Was k3s running before this run touched anything? Decides below whether a change needs a restart. A first start
+# (or a start of a crash-looping node) must never be followed by a restart: restarting a server that is still joining
+# etcd leaves server/cred/passwd newer than the datastore and k3s then refuses to start.
+- name: Is k3s active before this run
+  ansible.builtin.command: "systemctl is-active {{ svc_k3s_service }}"
+  register: _k3s_active
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Remember the running state
+  ansible.builtin.set_fact:
+    _k3s_was_active: "{{ _k3s_active.rc == 0 }}"
+
+# ---- Binary (sha256 pinned)
+- name: Installed version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: _k3s_ver
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Download and install the binary
+  when: svc_k3s_version not in (_k3s_ver.stdout | default(''))
+  block:
+    - name: Download release (sha256 pinned)
+      ansible.builtin.get_url:
+        url: "{{ svc_k3s_url }}"
+        dest: "/var/cache/k3s-{{ svc_k3s_version }}"
+        checksum: "sha256:{{ svc_k3s_sha256 }}"
+        mode: "0755"
+
+    - name: Install binary
+      ansible.builtin.copy:
+        src: "/var/cache/k3s-{{ svc_k3s_version }}"
+        dest: /usr/local/bin/k3s
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      register: _k3s_bin
+
+# ---- Control nodes: API VIP via keepalived (VRRP unicast between the three control nodes)
+- name: API VIP (keepalived)
+  when: svc_k3s_node_type == 'server'
+  block:
+    - name: Script user for the health script
+      ansible.builtin.user:
+        name: keepalived_script
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    # root-owned, not writable by others (keepalived enable_script_security)
+    - name: API health check script (needs no credentials)
+      ansible.builtin.copy:
+        src: "{{ role_path }}/../files/k3s-api-check.sh"
+        dest: /usr/local/bin/k3s-api-check
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: keepalived config
+      ansible.builtin.template:
+        src: "{{ role_path }}/../files/keepalived.conf.j2"
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart keepalived
+
+- name: Config directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+# ---- Tokens (controller memory only, never logged, never in Git). Escrow in OpenBao: tasks/escrow.yml.
+# agent-token: a distinct secret generated once on the first control node (root, 0600). Servers carry it as
+# `agent-token`, workers join with it. It cannot be used to join a control node.
+# server token: generated by k3s on the first control node; only the other control nodes use it.
+# delegate_to the init host is allowed: it is a host of the same deployment.
+- name: Agent token generated once on the first control node
+  ansible.builtin.shell: umask 077 && openssl rand -hex 32 > /etc/rancher/k3s/agent-token
+  args:
+    creates: /etc/rancher/k3s/agent-token
+  delegate_to: "{{ svc_k3s_init_host }}"
+  run_once: true
+
+- name: Agent token from the first control node
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/agent-token
+  delegate_to: "{{ svc_k3s_init_host }}"
+  register: _k3s_agent_raw
+  no_log: true
+  changed_when: false
+  check_mode: false
+
+- name: Agent token fact
+  ansible.builtin.set_fact:
+    _k3s_agent_token: "{{ _k3s_agent_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Server token from the first control node (joining control nodes)
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/token
+  delegate_to: "{{ svc_k3s_init_host }}"
+  register: _k3s_token_raw
+  no_log: true
+  changed_when: false
+  check_mode: false
+  when: svc_k3s_node_type == 'server' and inventory_hostname != svc_k3s_init_host
+
+- name: Server token fact
+  ansible.builtin.set_fact:
+    _k3s_token: "{{ _k3s_token_raw.content | b64decode | trim }}"
+  no_log: true
+  when: svc_k3s_node_type == 'server' and inventory_hostname != svc_k3s_init_host
+
+- name: k3s config
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/config.yaml.j2"
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  register: _k3s_cfg
+
+- name: Systemd unit
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/k3s.service.j2"
+    dest: "/etc/systemd/system/{{ svc_k3s_service }}.service"
+    mode: "0644"
+  register: _k3s_unit
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _k3s_unit.changed
+
+# A joining control node that is not running (first start, or crash-looping from an earlier failed start): its
+# server/cred/passwd may be newer than the datastore, which k3s treats as fatal. Stop the service and remove the
+# file; k3s recreates it from the datastore. The first control node is never touched (it is the datastore source),
+# and running nodes are skipped, so this is a no-op on healthy nodes.
+- name: Joining control node not running yet, clean start state
+  when: svc_k3s_node_type == 'server' and inventory_hostname != svc_k3s_init_host and not _k3s_was_active
+  block:
+    - name: Stop k3s (no-op if it is not running)
+      ansible.builtin.systemd:
+        name: "{{ svc_k3s_service }}"
+        state: stopped
+
+    - name: Remove a stale server credential file (recreated from the datastore)
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/server/cred/passwd
+        state: absent
+
+# Workers join through the VIP: wait for it (the control nodes sort first, so they are up and keepalived runs).
+- name: Wait for the API VIP (workers)
+  ansible.builtin.wait_for:
+    host: "{{ svc_k3s_api_vip }}"
+    port: "{{ svc_k3s_api_port }}"
+    timeout: 300
+  when: svc_k3s_node_type == 'agent'
+
+# Start (a first start returns when the node is up, Type=notify for servers). No restart follows it in this run.
+- name: k3s enabled and running
+  ansible.builtin.systemd:
+    name: "{{ svc_k3s_service }}"
+    enabled: true
+    state: started
+
+# Only a node that was already running before this run is restarted, and only if something it reads has changed.
+- name: Restart k3s to apply a changed binary, config or unit (only if it was already running)
+  ansible.builtin.systemd:
+    name: "{{ svc_k3s_service }}"
+    state: restarted
+  when: >-
+    _k3s_was_active and
+    ((_k3s_bin.changed | default(false)) or (_k3s_cfg.changed | default(false)) or (_k3s_unit.changed | default(false)))
+
+# keepalived starts only after k3s runs, so the VIP is never held by a node without an API
+- name: keepalived enabled and running
+  ansible.builtin.systemd:
+    name: keepalived
+    enabled: true
+    state: started
+  when: svc_k3s_node_type == 'server'
+
+- name: Apply keepalived restarts now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Token escrow in OpenBao, first control node only (both tokens exist once k3s runs there)
+- name: Token escrow
+  ansible.builtin.import_tasks: escrow.yml
+  when: inventory_hostname == svc_k3s_init_host
