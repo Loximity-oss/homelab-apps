@@ -1,0 +1,46 @@
+# AdGuard Home catalogue entry (migration step 7, infra #127). Copied from homelab-infra ansible/roles/app_adguard.
+# Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5. Deployments (wifi, iot) come in a later PR.
+name: adguard
+owner: oc-cfg
+catalog:
+  status: stable                 # example | beta (stg only) | stable | deprecated
+  summary: DNS filtering resolver for client zones
+  role: dns                      # role code(s) in standards naming/roles.yaml
+  pattern: pair                  # single | pair | cluster (+ count); stg may use `single`
+  os: [ubuntu]
+  size: {type: lxc, cores: 1, memory_mb: 1024, disk_gb: 8}
+  ports: [53/udp, 53/tcp, 80/tcp]
+  flows:
+    - {from: self-zone, to: self, ports: [53/udp, 53/tcp]}     # clients of its own zone: same L2, no rule
+    - {from: self, to: internet, ports: [53/udp, 53/tcp, 853/tcp, 443/tcp]}
+    - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
+    # no OpenBao flow: secret writes run on CT 300 via bao_create_secret, never from the guest
+  secrets:
+    - {path: "<zone>/secret/apps/adguard/<host>", keys: [username, password], by: role}   # generated at first deploy
+version:
+  pin: v0.107.79
+  known:                         # every version a deployment may pin, with its checksum
+    v0.107.79: c48f4a43000665484c5ec28177de11a004759b620dae8f77b2aabefc9ef3687f
+  source: github:AdguardTeam/AdGuardHome
+  url: "https://github.com/AdguardTeam/AdGuardHome/releases/download/{version}/AdGuardHome_linux_amd64.tar.gz"
+  vars: {version: app_adguard_version, url: app_adguard_url, sha256: app_adguard_sha256}
+  bump_class: B
+rollout:
+  serial: 1
+  order: sorted
+  stop_on_failure: true
+  health_between_hosts: true     # host n+1 starts only after host n passes `health`
+  groups: []
+health:                          # plain shell on the guest, exit 0 = healthy, no secrets, hard timeout
+  services: [AdGuardHome]
+  command: "dig @127.0.0.1 probe.hm1.lox-internal.dev +time=3 +tries=1 +short | grep -qx 192.0.2.53"
+  timeout_s: 20
+reboot:
+  policy: pair
+  timeout_s: 600
+probes:
+  - {name: dns-query, module: dns_udp, port: 53, query: probe.hm1.lox-internal.dev, expect: 192.0.2.53}
+  - {name: webui, module: http_2xx, port: 80, path: /login.html}
+peer_check: {module: dns_udp, port: 53, query: probe.hm1.lox-internal.dev}
+tests: tests/l4.goss.yaml.j2
+drift: {in_l4: true}
