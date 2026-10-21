@@ -1,0 +1,11 @@
+# AdGuard Home for the wifi client DNS pair (migration step 7, infra #127). Wave 2 per environments.yaml.
+# Shared config comes from catalog/adguard/role/defaults; no wifi-specific overrides existed in homelab-infra.
+app: adguard
+zone: wifi
+hosts: [hm1-wifi-dns01, hm1-wifi-dns02]
+version: catalog
+pin_until: null
+wave: 2
+pattern: null
+vars: {}
+host_vars: {}
