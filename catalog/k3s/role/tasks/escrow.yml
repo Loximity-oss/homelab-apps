@@ -1,0 +1,61 @@
+# Escrow of the k3s join tokens in OpenBao, create-only (cas=0), never read back by the pipeline. Runs on the first
+# control node only (imported from main.yml). The write goes through bao_create_secret on the controller with the
+# per-app child token of this deploy: the role has no lookup, no OpenBao address, no CA path and no token. The tokens
+# are read from the node (slurp) and passed as `data`: no `generate`, no `hash`, and bao_create_secret_result carries
+# no value. The marker file on the node is written only after a successful write; with the marker present nothing
+# here runs. Secret: <zone>/secret/apps/k3s/<first control node>, keys server_token and agent_token (Faris reads it).
+# A failed write fails the rollout at the first node (before any other node is touched); the cluster is not changed.
+- name: Escrow marker
+  ansible.builtin.stat:
+    path: "{{ svc_k3s_escrow_marker }}"
+  register: _k3s_escrow_marker
+  changed_when: false
+  check_mode: false
+
+- name: Store the tokens once
+  when: not _k3s_escrow_marker.stat.exists
+  no_log: true
+  block:
+    - name: Read the server token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/token
+      register: _k3s_escrow_server
+      changed_when: false
+      check_mode: false
+
+    - name: Read the agent token
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/agent-token
+      register: _k3s_escrow_agent
+      changed_when: false
+      check_mode: false
+
+    - name: Write once to OpenBao (create-only)
+      ansible.builtin.include_role:
+        name: bao_create_secret
+      vars:
+        path: "<zone>/secret/apps/k3s/<host>"
+        keys: [server_token, agent_token]
+        data:
+          server_token: "{{ _k3s_escrow_server.content | b64decode | trim }}"
+          agent_token: "{{ _k3s_escrow_agent.content | b64decode | trim }}"
+
+    # status exists = the secret is stored but the marker is gone (the run died between write and marker): a human
+    # decides (runbook, Tokens), the role does not guess.
+    - name: The write created the secret (or check mode)
+      ansible.builtin.assert:
+        that:
+          - bao_create_secret_result.status in ['created', 'check']
+        fail_msg: "k3s token escrow: the secret already exists in OpenBao but the marker is missing (see runbook, Tokens)"
+
+    - name: Marker directory
+      ansible.builtin.file:
+        path: /etc/hm1
+        state: directory
+        mode: "0700"
+
+    - name: Marker (after the successful write only)
+      ansible.builtin.copy:
+        dest: "{{ svc_k3s_escrow_marker }}"
+        content: "stored in OpenBao {{ zone }}/secret/apps/k3s/{{ inventory_hostname }}\n"
+        mode: "0600"

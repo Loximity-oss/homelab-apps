@@ -1,0 +1,9 @@
+- name: reload sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: true
+
+# k3s itself is never restarted from a handler: see 'Restart k3s' in tasks/main.yml (only when it was already running).
+- name: restart keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: restarted

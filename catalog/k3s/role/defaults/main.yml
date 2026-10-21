@@ -1,0 +1,32 @@
+# Defaults of the k3s role (was ansible/roles/svc_k3s/defaults/main.yml). Instance values (api_vip, vrrp_router_id,
+# taints) are set in deployments/shr/k3s.yaml `vars` in the deployment PR; the values here are the fallbacks and equal
+# the live cluster. No secrets here: tokens are read from the nodes and escrowed through bao_create_secret.
+
+# version, url and sha256 are set at deploy time from catalog version.pin / known / url (version.vars); these are fallbacks.
+# Upgrade = new entry in app.yaml version.known + version.pin (Class C), one minor version at a time.
+svc_k3s_version: "v1.36.5+k3s1"
+svc_k3s_sha256: d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313
+svc_k3s_url: "https://github.com/k3s-io/k3s/releases/download/{{ svc_k3s_version }}/k3s"
+
+# server (role code k3sc) or agent (role code k3sw), from the host's role in the infra spec
+svc_k3s_node_type: "{{ 'server' if role == 'k3sc' else 'agent' }}"
+svc_k3s_service: "{{ 'k3s' if svc_k3s_node_type == 'server' else 'k3s-agent' }}"
+
+# The first control node (sorted) bootstraps embedded etcd (--cluster-init); the others join it.
+# groups['role_k3sc'] is limited to the deployment's hosts by the pipeline.
+svc_k3s_init_host: "{{ (groups['role_k3sc'] | sort)[0] }}"
+svc_k3s_api_port: 6443
+
+# API VIP (shr vip band .200-.239), held by keepalived (VRRP, unicast) on the control nodes. Workers join through it.
+svc_k3s_api_vip: 192.168.70.200
+svc_k3s_vip_prefix: 24
+svc_k3s_vrrp_router_id: 70
+
+# Server taint: only addons that tolerate CriticalAddonsOnly (coredns, traefik, metrics-server ...) run on control nodes.
+svc_k3s_server_taints:
+  - CriticalAddonsOnly=true:NoExecute
+svc_k3s_etcd_snapshot_cron: "0 */12 * * *"
+svc_k3s_etcd_snapshot_retention: 10
+
+# Token escrow (tasks/escrow.yml): done-marker on the first control node.
+svc_k3s_escrow_marker: /etc/hm1/k3s-tokens-escrowed

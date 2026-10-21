@@ -1,0 +1,83 @@
+# L4 app checks for k3s on {{ inventory_hostname }} (new: infra had no k3s L4; proposal 4.5). Scoped per role code.
+# Read-only: nothing here changes the node. No credentials: kubectl uses the root-only local kubeconfig that exists on
+# control nodes only, so cluster-wide checks run on k3sc nodes. The API answers 401 without credentials
+# (anonymous-auth is off on purpose), so VIP checks accept 200 or 401.
+# Role defaults are not necessarily loaded when this renders, so every value has the same literal as fallback (keep in
+# sync with role/defaults/main.yml).
+# Deferred (needs the verify script, not a per-node check): exactly one control node holds the VIP.
+{% set is_server = (role | default('')) == 'k3sc' %}
+{% set version = svc_k3s_version | default('v1.36.5+k3s1') %}
+{% set vip = svc_k3s_api_vip | default('192.168.70.200') %}
+{% set port = svc_k3s_api_port | default(6443) %}
+{% set servers = groups['role_k3sc'] | default([]) | length %}
+{% set workers = groups['role_k3sw'] | default([]) | length %}
+{% set kc = '/usr/local/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml' %}
+service:
+{% if is_server %}
+  k3s:
+    enabled: true
+    running: true
+  keepalived:
+    enabled: true
+    running: true
+{% else %}
+  k3s-agent:
+    enabled: true
+    running: true
+{% endif %}
+kernel-param:
+  net.ipv4.ip_forward:
+    value: "1"
+  net.bridge.bridge-nf-call-iptables:
+    value: "1"
+command:
+  app-k3s-version:
+    exec: '/usr/local/bin/k3s --version'
+    exit-status: 0
+    stdout:
+      - "{{ version }}"
+  app-k3s-swap-off:
+    exec: 'n=$(swapon --show --noheadings | wc -l); echo "swap devices: $n"; test "$n" -eq 0'
+    exit-status: 0
+  app-k3s-kubelet-healthz:
+    exec: 'a=$(curl -s --max-time 5 http://127.0.0.1:10248/healthz); echo "kubelet healthz: $a"; test "$a" = ok'
+    exit-status: 0
+  app-k3s-api-vip:
+    exec: 'c=$(curl -ks -o /dev/null -w "%{http_code}" --max-time 5 https://{{ vip }}:{{ port }}/readyz); echo "VIP /readyz HTTP $c"; case "$c" in 200|401) exit 0;; *) exit 1;; esac'
+    exit-status: 0
+    timeout: 15000
+{% if is_server %}
+  app-k3s-listen-api:
+    exec: 'n=$(ss -Hltn "sport = :{{ port }}" | wc -l); echo "tcp/{{ port }} listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-k3s-api-check-script:
+    exec: '/usr/local/bin/k3s-api-check; rc=$?; echo "k3s-api-check rc=$rc"; exit $rc'
+    exit-status: 0
+  app-k3s-readyz:
+    exec: 'a=$({{ kc }} get --raw /readyz); echo "readyz: $a"; test "$a" = ok'
+    exit-status: 0
+    timeout: 20000
+  app-k3s-etcd:
+    exec: '{{ kc }} get --raw "/readyz?verbose" | grep -F "[+]etcd ok"'
+    exit-status: 0
+    timeout: 20000
+  app-k3s-nodes-ready:
+    exec: |
+      t=$({{ kc }} get nodes --no-headers | wc -l)
+      r=$({{ kc }} get nodes --no-headers | awk '$2 == "Ready"' | wc -l)
+      echo "nodes: $t, Ready: $r (expected {{ servers + workers }})"
+      test "$t" -eq {{ servers + workers }} && test "$r" -eq {{ servers + workers }}
+    exit-status: 0
+    timeout: 30000
+  app-k3s-etcd-members:
+    exec: 'n=$({{ kc }} get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l); echo "etcd nodes: $n (expected {{ servers }})"; test "$n" -eq {{ servers }}'
+    exit-status: 0
+    timeout: 20000
+  app-k3s-system-pods:
+    exec: |
+      bad=$({{ kc }} get pods -n kube-system --no-headers | awk '$3 ~ /CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull/' | wc -l)
+      echo "kube-system pods in a failed state: $bad"
+      test "$bad" -eq 0
+    exit-status: 0
+    timeout: 30000
+{% endif %}

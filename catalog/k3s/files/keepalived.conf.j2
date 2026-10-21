@@ -1,0 +1,33 @@
+# Managed by Ansible (role svc_k3s). API VIP {{ svc_k3s_api_vip }} for the k3s control plane.
+{% set servers = groups['role_k3sc'] | sort %}
+global_defs {
+  enable_script_security
+  script_user keepalived_script
+}
+
+vrrp_script chk_apiserver {
+  script "/usr/local/bin/k3s-api-check"
+  interval 3
+  fall 3
+  rise 2
+}
+
+vrrp_instance K3S_API {
+  state BACKUP
+  interface {{ ansible_default_ipv4.interface }}
+  virtual_router_id {{ svc_k3s_vrrp_router_id }}
+  priority {{ 150 - 10 * servers.index(inventory_hostname) }}
+  advert_int 1
+  unicast_src_ip {{ ansible_host }}
+  unicast_peer {
+{% for h in servers if h != inventory_hostname %}
+    {{ hostvars[h].ansible_host }}
+{% endfor %}
+  }
+  virtual_ipaddress {
+    {{ svc_k3s_api_vip }}/{{ svc_k3s_vip_prefix }}
+  }
+  track_script {
+    chk_apiserver
+  }
+}

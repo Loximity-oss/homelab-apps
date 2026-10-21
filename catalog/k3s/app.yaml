@@ -1,0 +1,67 @@
+# k3s catalogue entry (migration step 8, infra #127). Derived from homelab-infra ansible/roles/svc_k3s + apps/k3s.
+# Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5 and its 'k3s entry differences'.
+# The deployment (deployments/shr/k3s.yaml) comes in a later PR. VM 210 is in no deployment and never touched.
+name: k3s
+owner: oc-cfg
+catalog:
+  status: stable                 # example | beta (stg only) | stable | deprecated; no stg canary (Q10 deferred)
+  summary: k3s HA Kubernetes cluster (3 control nodes with embedded etcd, 2 workers, keepalived API VIP)
+  role: [k3sc, k3sw]             # control nodes, workers (role codes in standards naming/roles.yaml)
+  pattern: cluster
+  count: {k3sc: 3, k3sw: 2}
+  os: [ubuntu]
+  size:                          # per role code; VMs (k3s needs kernel modules, sysctls, /dev/kmsg)
+    k3sc: {type: vm, cores: 2, memory_mb: 4096, disk_gb: 20, datastore: lvmt-nvme01}   # etcd is fsync bound
+    k3sw: {type: vm, cores: 4, memory_mb: 6144, disk_gb: 40, datastore: lvmt-sata01}
+  ports: [6443/tcp, 2379-2380/tcp, 10250/tcp, 8472/udp, 112/vrrp]
+  flows:
+    - {from: self-zone, to: self, ports: [6443/tcp, 2379-2380/tcp, 10250/tcp, 8472/udp, 112/vrrp]}   # all nodes share one L2: no rule
+    - {from: self, to: internet, ports: [443/tcp, 53/udp, 53/tcp]}   # github.com (binary), container registries, DNS
+    - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
+    # probe flow (hm1-mgt-aiops01 -> self :6443) is derived from probes, never hand-listed
+    # no OpenBao flow: the token escrow runs on CT 300 via bao_create_secret, never from the guest
+  secrets:
+    # written once (create-only) by the role on the FIRST sorted control node; <host> is that node
+    - {path: "<zone>/secret/apps/k3s/<host>", keys: [server_token, agent_token], by: role}
+version:
+  pin: "v1.36.5+k3s1"
+  known:                         # every version a deployment may pin, with its sha256 (release sha256sum-amd64.txt, line `k3s`)
+    "v1.36.5+k3s1": d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313
+  source: github:k3s-io/k3s
+  url: "https://github.com/k3s-io/k3s/releases/download/{version}/k3s"   # a literal '+' in the path works on GitHub (checked 2026-10-21)
+  vars: {version: svc_k3s_version, url: svc_k3s_url, sha256: svc_k3s_sha256}
+  bump_class: C                  # k3s is always Class C
+rollout:
+  serial: 1
+  order: sorted                  # k3sc01..03 sort before k3sw01..02: control plane first, first sorted host runs --cluster-init
+  stop_on_failure: true
+  health_between_hosts: true     # node n+1 starts only after node n passes `health` (quorum safety)
+  groups: []                     # drain/uncordon hooks per group are not supported by playbooks/deploy.yml yet: deferred
+health:                          # plain shell on the guest, exit 0 = healthy, no secrets, hard timeout
+  services: []                   # k3s on control nodes, k3s-agent on workers: checked by the command below
+  command: |-
+    k=/usr/local/bin/k3s; kc="$k kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"; n=$(hostname); i=0
+    while [ $i -lt 50 ]; do
+      if [ -f /etc/systemd/system/k3s-agent.service ]; then
+        systemctl is-active --quiet k3s-agent && [ "$(curl -s --max-time 3 http://127.0.0.1:10248/healthz)" = ok ] && exit 0
+      else
+        [ "$($kc get --raw /readyz 2>/dev/null)" = ok ] \
+          && [ "$($kc get node $n -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ] \
+          && systemctl is-active --quiet k3s && exit 0
+      fi
+      i=$((i + 1)); sleep 5
+    done
+    exit 1
+  timeout_s: 270
+reboot:
+  policy: drain                  # one node at a time, drained first; never two control nodes together
+  timeout_s: 600
+probes:
+  # `roles` limits a probe to those role codes (scoping per role code; the file_sd generator must honour it).
+  # /readyz answers 401 without credentials (anonymous-auth is off on purpose), so the probe is a TCP connect;
+  # the 401-aware /readyz check is in L4. A VIP probe module that accepts 401 is a follow-up (openclaw).
+  - {name: k3s-api, module: tcp_connect, port: 6443, roles: [k3sc]}
+  - {name: kubelet, module: tcp_connect, port: 10250}
+peer_check: {module: tcp_connect, port: 6443, roles: [k3sc]}
+tests: tests/l4.goss.yaml.j2
+drift: {in_l4: false}
