@@ -1,0 +1,73 @@
+# Read-only status report, runs at the end of every deploy (tag adguard_status). Changes nothing on the guest.
+# One summary line per host in the deploy log. Hard failures: service not active; an enabled filter with 0 rules
+# (or a missing file) after ~60s (on a new guest or new filter id AdGuard downloads the list asynchronously).
+# Everything else is reported, not fatal. No credentials are used (rule counts come from the filter files, not the
+# API), so no secrets can reach the log. All tasks are read-only: check_mode: false + changed_when: false.
+- name: AdGuard status | service state
+  ansible.builtin.command: systemctl is-active AdGuardHome
+  register: _adguard_st_active
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+# One shell loop over the enabled filter ids, printing id=count; fails when any count is 0.
+# ignore_errors, not failed_when: with retries/until Ansible marks the task failed when the retries are exhausted,
+# whatever failed_when says. ignore_errors lets the report and the assert (with its message) still run.
+- name: AdGuard status | rules per enabled filter (waits up to ~60s for the async download)
+  ansible.builtin.shell:
+    cmd: |
+      bad=0; out=""
+      for id in {% for f in app_adguard_filters if f.enabled %}{{ f.id }} {% endfor %}; do
+        n=$(awk '!/^[[:space:]]*($|!|#|\[)/ {n++} END {print n+0}' "{{ app_adguard_dir }}/data/filters/$id.txt" 2>/dev/null || echo 0)
+        out="$out $id=$n"
+        [ "$n" -gt 0 ] || bad=1
+      done
+      echo "$out"
+      exit $bad
+  register: _adguard_st_rules
+  ignore_errors: true
+  changed_when: false
+  check_mode: false
+  retries: 12
+  delay: 5
+  until: _adguard_st_rules.rc == 0
+
+- name: AdGuard status | journal error/failure lines, last 10 min
+  ansible.builtin.shell: "journalctl -u AdGuardHome --since '-10min' --no-pager -q | grep -ciE 'error|failed' || true"
+  register: _adguard_st_journal
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: AdGuard status | drift rc (managed vs live config)
+  ansible.builtin.command: "{{ app_adguard_drift_script }} {{ app_adguard_conf_dir }}/AdGuardHome.yaml.managed {{ app_adguard_conf_dir }}/AdGuardHome.yaml"
+  register: _adguard_st_drift
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: AdGuard status | test query on 127.0.0.1
+  ansible.builtin.command: "dig +short +time=3 +tries=1 @127.0.0.1 -p {{ app_adguard_dns_port }} example.com A"
+  register: _adguard_st_dig
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: AdGuard status | report
+  ansible.builtin.debug:
+    msg: >-
+      ADGUARD-STATUS {{ inventory_hostname }}:
+      service={{ _adguard_st_active.stdout | trim }}
+      rules=[{{ _adguard_st_rules.stdout | default('') | trim }}]
+      journal_err_10m={{ _adguard_st_journal.stdout | trim }}
+      drift_rc={{ _adguard_st_drift.rc }}
+      dig={{ ('ok ' ~ _adguard_st_dig.stdout_lines[0]) if (_adguard_st_dig.rc == 0 and _adguard_st_dig.stdout | trim | length > 0) else 'FAIL' }}
+      {{ 'WARN' if ((_adguard_st_journal.stdout | trim) != '0' or _adguard_st_drift.rc != 0 or _adguard_st_dig.rc != 0 or _adguard_st_dig.stdout | trim | length == 0) else 'OK' }}
+
+- name: AdGuard status | hard failures only (service not active, enabled filter with 0 rules)
+  ansible.builtin.assert:
+    that:
+      - _adguard_st_active.stdout | trim == 'active'
+      - _adguard_st_rules.rc == 0
+    fail_msg: "AdGuard hard failure on {{ inventory_hostname }}: service={{ _adguard_st_active.stdout | trim }}, rules=[{{ _adguard_st_rules.stdout | default('') | trim }}] (an enabled filter has 0 rules or its file is missing after 60s)"
+    success_msg: "AdGuard hard checks passed on {{ inventory_hostname }}"
