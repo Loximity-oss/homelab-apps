@@ -1,0 +1,12 @@
+# AdGuard Home for the iot client DNS pair (migration step 7, infra #127). Wave 3 per environments.yaml,
+# so a bad bump never hits both client DNS zones at once.
+# Shared config comes from catalog/adguard/role/defaults; no iot-specific overrides existed in homelab-infra.
+app: adguard
+zone: iot
+hosts: [hm1-iot-dns01, hm1-iot-dns02]
+version: catalog
+pin_until: null
+wave: 3
+pattern: null
+vars: {}
+host_vars: {}
