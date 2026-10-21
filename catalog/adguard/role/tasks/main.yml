@@ -151,6 +151,7 @@
     src: "{{ app_adguard_hash_file }}"
   register: _adguard_hash_raw
   no_log: true
+  changed_when: false
   check_mode: false
 
 - name: Admin hash fact
