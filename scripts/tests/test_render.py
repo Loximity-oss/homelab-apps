@@ -155,6 +155,26 @@ class Render(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("compose.yaml.j2", r.stderr + diff)
 
+    def test_to_json_bare_placeholder(self):
+        """A fact that does not exist offline, piped through to_json, renders as its placeholder (infra #127)."""
+        write(self.head, "catalog/demo/role/templates/facts.json.j2", "{{ no_such_fact | to_json }}\n")
+        write(self.head, "deployments/stg/demo.yaml", deployment(9090))
+        r, diff = self.run_render()
+        self.assertEqual(r.returncode, 0, r.stderr + diff)
+        self.assertIn('"<<undefined:no_such_fact>>"', diff)
+        self.assertNotIn("TypeError", r.stderr + diff)
+
+    def test_to_json_dict_with_placeholder(self):
+        """A placeholder inside a mapping is serialised too; the defined values keep their real value."""
+        write(self.head, "catalog/demo/role/templates/peer.json.j2",
+              "{{ {'addr': other_fact.ipv4, 'port': demo_port} | to_json }}\n")
+        write(self.head, "deployments/stg/demo.yaml", deployment(9090))
+        r, diff = self.run_render()
+        self.assertEqual(r.returncode, 0, r.stderr + diff)
+        self.assertIn('"addr": "<<undefined:other_fact>>"', diff)
+        self.assertIn('"port": 9090', diff)
+        self.assertNotIn("TypeError", r.stderr + diff)
+
     @unittest.skipUnless(shutil.which("bwrap") and os.path.isdir(VENV), "needs bwrap and /opt/ansible-apps")
     def test_bwrap_clearenv_no_passwd(self):
         """ci-pr.sh's sandbox: --clearenv (no USER/LOGNAME) and no /etc/passwd; this is the CT 300 failure."""
