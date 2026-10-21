@@ -1,10 +1,9 @@
 name: verify
 # L4 app verification + app drift, from main only (scripts/ci-verify.sh refuses any other ref). Read-only.
-# The nightly 03:15 MYT schedule is enabled at cutover (migration step 10); until the apps-play-run wrapper accepts
-# APPS_MODE=verify (infra host/apps-runner, Class C) ci-verify.sh fails closed (exit 2 from the wrapper).
+# Nightly 03:15 MYT since cutover step 10(c) (infra #127): L4 moved here from infra verify (03:00).
 on:
-  # schedule:
-  #   - cron: "15 19 * * *" # 03:15 MYT, after infra verify (03:00)
+  schedule:
+    - cron: "15 19 * * *" # 03:15 MYT, after infra verify (03:00)
   workflow_dispatch:
     inputs:
       hosts:
