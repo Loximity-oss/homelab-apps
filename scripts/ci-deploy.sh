@@ -55,7 +55,13 @@ git -C "$BASE" merge-base --is-ancestor "$SHA" FETCH_HEAD || refuse "$SHA is not
 
 # ---- OpenBao (AppRole ci-apps): parent token kept for minting child tokens; never exported to a play.
 export BAO_ADDR=https://192.168.70.12:8200 BAO_CACERT=/etc/ssl/devops/openbao-ca.crt
-PARENT=$(bao write -field=token auth/approle/login role_id=@/etc/openbao/ci-apps/role_id secret_id=@/etc/openbao/ci-apps/secret_id)
+# The AppRole token lives 1 h (standards approles.yaml token_ttl) and WAVE_DELAY is 1 h, so every child mint logs in
+# again first (run 664: wave 3 minted 63 min after the login -> "permission denied"). The old parent is revoked.
+parent_login() {
+  [ -n "${PARENT:-}" ] && { BAO_TOKEN=$PARENT bao token revoke -self >/dev/null 2>&1 || true; }
+  PARENT=$(bao write -field=token auth/approle/login role_id=@/etc/openbao/ci-apps/role_id secret_id=@/etc/openbao/ci-apps/secret_id)
+}
+PARENT=""; parent_login
 export GITEA_API_TOKEN; GITEA_API_TOKEN=$(BAO_TOKEN=$PARENT bao kv get -mount=secret -field=gitea_apps_token hm1/platform/ci/apps)
 PVE_TOKEN=$(BAO_TOKEN=$PARENT bao kv get -mount=secret -field=pve_token_apps hm1/platform/ci/apps)
 W=$(mktemp -d); REPORT="$W/deploy.md"; : > "$REPORT"
@@ -279,6 +285,9 @@ PY
   # child token: this app only, explicit TTL (<= token role max); check mode needs none (bao_create_secret is a no-op)
   if [ "$APPS_MODE" = apply ]; then
     ttl=$(( APPS_TOKEN_TTL < APPS_TIMEOUT ? APPS_TOKEN_TTL : APPS_TIMEOUT ))
+    if ! parent_login 2> "$W/token.err"; then
+      note "  - ❌ $path: AppRole ci-apps login failed: $(tail -1 "$W/token.err" | tr -d '`')"; end_play; return 1
+    fi
     if ! CHILD=$(BAO_TOKEN=$PARENT bao token create -role="apps-$app" -ttl="${ttl}s" -field=token 2> "$W/token.err"); then
       CHILD=""; note "  - ❌ $path: child token apps-$app not minted: $(tail -1 "$W/token.err" | tr -d '`')"; end_play; return 1
     fi
