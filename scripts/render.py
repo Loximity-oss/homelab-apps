@@ -5,7 +5,8 @@ Run by main's scripts/ci-pr.sh inside bwrap: no network, every tree read-only, o
 root-owned venv /opt/ansible-apps/venv (python -I). For each deployment the PR adds, changes or removes it renders,
 on main (--base) and on the PR (--head), every template of the catalogue entry plus the merged variables of every
 host, and writes a unified diff. No task runs; nothing reaches a guest, OpenBao or the network. Facts, registered
-results and secrets do not exist offline: they render as placeholders (<<undefined:NAME>>). Class C.
+results and secrets do not exist offline: they render as placeholders (<<undefined:NAME>>), also inside the value of
+to_json / to_nice_json / to_yaml / to_nice_yaml. Class C.
 
 Entry point:
   render.py --base MAIN --head PR --infra INFRA --protected protected.yaml --out OUT
@@ -30,6 +31,7 @@ Rendered: role/templates/** (all), files/**/*.j2, tests/**/*.j2; other text file
 """
 import argparse
 import difflib
+import functools
 import glob
 import hashlib
 import json
@@ -62,6 +64,8 @@ JINJA_MARKS = ("{{", "{%", "{#")
 MAX_FILE = 1 << 20
 SPEC_KEYS = ("ansible_host", "vmid", "zone", "role", "keyctl", "type", "os")
 MAGIC_HIDDEN = ("inventory_hostname", "inventory_hostname_short", "groups", "role_path", "playbook_dir", "omit")
+# serialising filters: a placeholder anywhere in their value is replaced by its text first (infra #127)
+SERIALISERS = ("to_json", "to_nice_json", "to_yaml", "to_nice_yaml")
 
 
 class SetupError(Exception):
@@ -108,10 +112,33 @@ def make_env(af, at, names_f, names_t):
         def __str__(self):
             return f"<<undefined:{self._undefined_name or '?'}>>"
 
+    def _offline(v):
+        """Copy of v with every Placeholder (bare, in mapping keys/values, in lists/tuples) as '<<undefined:NAME>>'."""
+        if isinstance(v, Placeholder):
+            return str(v)
+        if isinstance(v, dict):
+            return {_offline(k): _offline(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_offline(x) for x in v]
+        return v
+
+    def serialisable(fn):
+        first = 1 if getattr(fn, "jinja_pass_arg", None) is not None else 0   # pass_context/environment/...
+
+        @functools.wraps(fn)      # also copies jinja_pass_arg
+        def wrapped(*args, **kw):
+            if len(args) > first:
+                args = args[:first] + (_offline(args[first]),) + args[first + 1:]
+            return fn(*args, **kw)
+        return wrapped
+
     env = ImmutableSandboxedEnvironment(undefined=Placeholder, trim_blocks=True, keep_trailing_newline=True,
                                         autoescape=False)
     bf, bt = env.filters, env.tests
     env.filters = {n: af.get(n) or bf[n] for n in names_f if n in af or n in bf}
+    for n in SERIALISERS:
+        if n in env.filters:
+            env.filters[n] = serialisable(env.filters[n])
     env.tests = {n: at.get(n) or bt[n] for n in names_t if n in at or n in bt}
     return env
 
