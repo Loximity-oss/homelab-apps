@@ -13,7 +13,7 @@ catalog:
   flows:
     - {from: self-zone, to: self, ports: [8080/tcp]}
     - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
-secrets: []                      # e.g. {path: "<zone>/secret/apps/example", keys: [password], by: role}
+  secrets: []                    # e.g. {path: "<zone>/secret/apps/example", keys: [password], by: role}
 version:
   pin: "1.10.3"                  # container image tag
   known:

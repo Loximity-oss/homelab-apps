@@ -1,0 +1,300 @@
+# AdGuard Home, native binary (no Docker). Order: free port 53 -> binary -> admin secret -> config -> service -> healthcheck.
+# Config is code: files/AdGuardHome.yaml.j2 + role defaults (deployment `vars` override per zone/host).
+# Check mode (lint gate 5.1): read-only tasks carry check_mode: false + changed_when: false. Known check-mode exceptions:
+# the AdGuardHome.yaml.managed rewrite (never the live file) and the --version-gated download block.
+- name: Packages
+  ansible.builtin.apt:
+    name: [bind9-dnsutils, python3-yaml]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+
+# ---- Port 53: switch the systemd-resolved stub listener off before AdGuard starts
+- name: Resolved drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Resolved stub listener off
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/adguardhome.conf
+    content: |
+      [Resolve]
+      DNSStubListener=no
+    mode: "0644"
+  notify: restart resolved
+
+- name: Resolver file state
+  ansible.builtin.stat:
+    path: /etc/resolv.conf
+  register: _adguard_resolv
+
+# With the stub off, a resolv.conf pointing at 127.0.0.53 would stop resolving (needed for the download below).
+- name: Resolv.conf to the real upstream list when it points at the stub
+  ansible.builtin.file:
+    src: /run/systemd/resolve/resolv.conf
+    dest: /etc/resolv.conf
+    state: link
+    force: true
+  when: _adguard_resolv.stat.islnk | default(false) and _adguard_resolv.stat.lnk_source | default('') is search('stub-resolv.conf')
+  notify: restart resolved
+
+- name: Apply resolved change now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Binary. Install dir and binary are root-owned; the service user can only write conf/ and data/.
+- name: Service user
+  ansible.builtin.user:
+    name: "{{ app_adguard_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Install directory (root-owned, group may traverse)
+  ansible.builtin.file:
+    path: "{{ app_adguard_dir }}"
+    state: directory
+    owner: root
+    group: "{{ app_adguard_user }}"
+    mode: "0750"
+
+- name: Writable directories for the service
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_adguard_user }}"
+    group: "{{ app_adguard_user }}"
+    mode: "0750"
+  loop:
+    - "{{ app_adguard_conf_dir }}"
+    - "{{ app_adguard_dir }}/data"
+
+- name: Installed version
+  ansible.builtin.command: "{{ app_adguard_dir }}/AdGuardHome --version"
+  register: _adguard_ver
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Download, unpack and install the binary
+  when: app_adguard_version not in (_adguard_ver.stdout | default(''))
+  block:
+    - name: Download release (sha256 pinned)
+      ansible.builtin.get_url:
+        url: "{{ app_adguard_url }}"
+        dest: "/var/cache/AdGuardHome-{{ app_adguard_version }}.tar.gz"
+        checksum: "sha256:{{ app_adguard_sha256 }}"
+        mode: "0644"
+
+    - name: Staging directory
+      ansible.builtin.file:
+        path: "/var/cache/AdGuardHome-{{ app_adguard_version }}"
+        state: directory
+        mode: "0755"
+
+    # Unpacked whole into a staging dir: no dependency on the member-name prefix (AdGuardHome/ vs ./AdGuardHome/).
+    - name: Unpack release
+      ansible.builtin.unarchive:
+        src: "/var/cache/AdGuardHome-{{ app_adguard_version }}.tar.gz"
+        dest: "/var/cache/AdGuardHome-{{ app_adguard_version }}"
+        remote_src: true
+
+    - name: Install binary
+      ansible.builtin.copy:
+        src: "/var/cache/AdGuardHome-{{ app_adguard_version }}/AdGuardHome/AdGuardHome"
+        dest: "{{ app_adguard_dir }}/AdGuardHome"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: restart adguardhome
+
+# ---- Admin password: generated once per guest by bao_create_secret on the controller (OpenBao create-only, the
+# plaintext never leaves the script). Only the bcrypt hash comes back and goes to the guest. The hash file on the
+# guest is the "done" marker. If the secret already exists but the marker is gone, the role fails (see runbook).
+- name: Hash directory
+  ansible.builtin.file:
+    path: /etc/hm1
+    state: directory
+    mode: "0700"
+
+- name: Check admin hash
+  ansible.builtin.stat:
+    path: "{{ app_adguard_hash_file }}"
+  register: _adguard_hash
+
+- name: Create the admin secret once and keep only its bcrypt hash on the guest
+  when: not _adguard_hash.stat.exists
+  no_log: true
+  block:
+    - name: Admin password, once
+      ansible.builtin.include_role:
+        name: bao_create_secret
+      vars:
+        path: "<zone>/secret/apps/adguard/<host>"
+        keys: [username, password]
+        data: {username: "{{ app_adguard_admin_user }}"}
+        generate: {key: password, length: 28, chars: [ascii_letters, digits]}
+        hash: bcrypt
+
+    - name: Keep only the bcrypt hash on the guest
+      ansible.builtin.copy:
+        dest: "{{ app_adguard_hash_file }}"
+        content: "{{ bao_create_secret_result.hash }}\n"
+        mode: "0600"
+      when: bao_create_secret_result.status == 'created'
+
+- name: Read admin hash
+  ansible.builtin.slurp:
+    src: "{{ app_adguard_hash_file }}"
+  register: _adguard_hash_raw
+  no_log: true
+  changed_when: false
+  check_mode: false
+
+- name: Admin hash fact
+  ansible.builtin.set_fact:
+    _adguard_admin_hash: "{{ _adguard_hash_raw.content | b64decode | trim }}"
+  no_log: true
+
+# ---- Config converge. AdGuard rewrites its own YAML (defaults, migrations, filter timestamps, UI edits), so a byte
+# compare would never settle. The template is rendered to AdGuardHome.yaml.managed (never the live path); it is
+# validated with `AdGuardHome --check-config` BEFORE anything touches the live file; a semantic check
+# (files/adguard-drift.py) then tests that every key the template sets has the same value in the live file.
+# Any drift (UI edit, hand edit, template change, missing file) -> the whole live file is replaced by the validated
+# render and the service restarted. Settings the template does not mention therefore reset to AdGuard defaults on
+# drift. No drift -> nothing changes, no restart. Query log/stats data in data/ is never touched.
+# The probe.hm1 rewrite is part of the rendered config, so it exists before the service starts and before the first
+# healthcheck below.
+- name: Drift check script
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../files/adguard-drift.py"
+    dest: "{{ app_adguard_drift_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render config
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/AdGuardHome.yaml.j2"
+    dest: "{{ app_adguard_conf_dir }}/AdGuardHome.yaml.managed"
+    owner: "{{ app_adguard_user }}"
+    group: "{{ app_adguard_user }}"
+    mode: "0600"
+  no_log: true
+
+# Fails the play (and, with any_errors_fatal, the rollout) on an invalid render. The live file, the
+# service and the other hosts are untouched at this point. Runs as the service user, same as the daemon.
+- name: Validate rendered config (AdGuardHome --check-config)
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ app_adguard_user }}"
+      - --
+      - "{{ app_adguard_dir }}/AdGuardHome"
+      - --check-config
+      - --no-check-update
+      - -c
+      - "{{ app_adguard_conf_dir }}/AdGuardHome.yaml.managed"
+      - -w
+      - "{{ app_adguard_dir }}"
+  register: _adguard_check
+  changed_when: false
+  check_mode: false
+
+- name: Retire the old applied marker
+  ansible.builtin.file:
+    path: "{{ app_adguard_conf_dir }}/AdGuardHome.yaml.applied"
+    state: absent
+
+- name: Live config present
+  ansible.builtin.stat:
+    path: "{{ app_adguard_conf_dir }}/AdGuardHome.yaml"
+  register: _adguard_live
+
+- name: Config drift check (managed keys vs live; prints key paths only)
+  ansible.builtin.command: "{{ app_adguard_drift_script }} {{ app_adguard_conf_dir }}/AdGuardHome.yaml.managed {{ app_adguard_conf_dir }}/AdGuardHome.yaml"
+  register: _adguard_drift
+  failed_when: _adguard_drift.rc not in [0, 1, 2]
+  changed_when: false
+  check_mode: false
+  when: _adguard_live.stat.exists
+
+- name: Drift found (these keys will be reverted to the template)
+  ansible.builtin.debug:
+    msg: "{{ _adguard_drift.stdout_lines }}"
+  when: _adguard_drift.rc | default(0) != 0
+
+- name: Install config
+  ansible.builtin.copy:
+    src: "{{ app_adguard_conf_dir }}/AdGuardHome.yaml.managed"
+    dest: "{{ app_adguard_conf_dir }}/AdGuardHome.yaml"
+    remote_src: true
+    owner: "{{ app_adguard_user }}"
+    group: "{{ app_adguard_user }}"
+    mode: "0600"
+  when: not _adguard_live.stat.exists or _adguard_drift.rc | default(1) != 0
+  no_log: true
+  notify: restart adguardhome
+
+# ---- Service
+- name: Systemd unit
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/AdGuardHome.service.j2"
+    dest: /etc/systemd/system/AdGuardHome.service
+    mode: "0644"
+  register: _adguard_unit
+  notify: restart adguardhome
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _adguard_unit.changed
+
+- name: Enabled and running
+  ansible.builtin.systemd:
+    name: AdGuardHome
+    enabled: true
+    state: started
+
+- name: Apply restarts now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Healthcheck: the probe.hm1 rewrite answers (no upstream needed), DNS resolves via upstream, admin UI answers (200, or 302 to login/install)
+- name: Healthcheck probe rewrite
+  ansible.builtin.command: "dig +short +time=3 +tries=1 @127.0.0.1 -p {{ app_adguard_dns_port }} {{ app_adguard_probe_domain }} A"
+  register: _adguard_probe
+  retries: 10
+  delay: 3
+  until: _adguard_probe.rc == 0 and _adguard_probe.stdout | trim == app_adguard_probe_answer
+  changed_when: false
+  check_mode: false
+
+- name: Healthcheck DNS query
+  ansible.builtin.command: "dig +short +time=3 +tries=1 @127.0.0.1 -p {{ app_adguard_dns_port }} example.com A"
+  register: _adguard_dig
+  retries: 10
+  delay: 3
+  until: _adguard_dig.rc == 0 and _adguard_dig.stdout | trim | length > 0
+  changed_when: false
+  check_mode: false
+
+- name: Healthcheck web UI
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_adguard_http_port }}/"
+    follow_redirects: none
+    status_code: [200, 302]
+  register: _adguard_hc
+  retries: 10
+  delay: 3
+  until: _adguard_hc.status in [200, 302]
+  changed_when: false
+  check_mode: false
+
+# ---- Read-only status report (summary line per host in the deploy log; hard-fails only on service down / empty filter)
+- name: Status report
+  ansible.builtin.import_tasks: status.yml
+  tags: [adguard_status]

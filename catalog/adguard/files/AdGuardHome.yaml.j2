@@ -1,0 +1,39 @@
+# Managed by Ansible (homelab-apps catalog/adguard: role defaults + deployment vars). Do not edit on the guest:
+# any difference in the keys below (UI edits included) is reverted and the service restarted at the next deploy.
+schema_version: 34
+http:
+  address: {{ (app_adguard_http_bind ~ ':' ~ app_adguard_http_port) | to_json }}
+  session_ttl: 720h
+users:
+  - name: {{ app_adguard_admin_user | to_json }}
+    password: {{ _adguard_admin_hash | to_json }}
+dns:
+  bind_hosts: {{ app_adguard_bind_hosts | to_json }}
+  port: {{ app_adguard_dns_port }}
+  upstream_mode: {{ app_adguard_upstream_mode }}
+  upstream_dns: {{ app_adguard_upstreams | to_json }}
+  bootstrap_dns: {{ app_adguard_bootstrap | to_json }}
+  cache_enabled: true
+  cache_size: {{ app_adguard_cache_size }}
+  allowed_clients: {{ app_adguard_allowed_clients | to_json }}
+  disallowed_clients: {{ app_adguard_disallowed_clients | to_json }}
+tls:
+  enabled: false
+dhcp:
+  enabled: false
+querylog:
+  enabled: true
+  file_enabled: true
+  interval: {{ app_adguard_querylog_interval }}
+statistics:
+  enabled: true
+  interval: {{ app_adguard_stats_interval }}
+filtering:
+  filtering_enabled: true
+  blocking_mode: default  # v0.107.79 keeps it under filtering:, not dns: (under dns: it was ignored and drifted every run)
+  # The probe rewrite is always first and cannot be dropped by a deployment (probes and health depend on it).
+  rewrites: {{ ([{'domain': app_adguard_probe_domain, 'answer': app_adguard_probe_answer, 'enabled': true}] + app_adguard_rewrites + app_adguard_rewrites_extra) | to_json }}
+filters: {{ app_adguard_filters | to_json }}
+user_rules: {{ (app_adguard_user_rules + app_adguard_user_rules_extra) | to_json }}
+clients:
+  persistent: {{ (app_adguard_clients + app_adguard_clients_extra) | to_json }}

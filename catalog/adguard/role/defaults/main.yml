@@ -1,0 +1,73 @@
+# Shared defaults for every AdGuard deployment (was ansible/playbooks/group_vars/role_dns.yml + app_adguard defaults).
+# Per-zone or per-host values go into deployments/<zone>/adguard.yaml `vars` / `host_vars` (they override these).
+# No secrets here: the admin password hash comes from bao_create_secret.
+
+# ---- structural
+# version, url and sha256 are set at deploy time from catalog version.pin / known / url (version.vars); these are fallbacks
+app_adguard_version: v0.107.79
+app_adguard_sha256: c48f4a43000665484c5ec28177de11a004759b620dae8f77b2aabefc9ef3687f
+app_adguard_url: "https://github.com/AdguardTeam/AdGuardHome/releases/download/{{ app_adguard_version }}/AdGuardHome_linux_amd64.tar.gz"
+app_adguard_dir: /opt/AdGuardHome
+# writable by the service user: live config (AdGuard rewrites it atomically, so it needs the directory) and managed copy
+app_adguard_conf_dir: "{{ app_adguard_dir }}/conf"
+app_adguard_user: adguard
+app_adguard_admin_user: admin
+# bcrypt hash of the admin password; kept root-only on the guest so later runs re-render the same hash
+app_adguard_hash_file: /etc/hm1/adguard-admin.hash
+app_adguard_drift_script: /usr/local/sbin/hm1-adguard-drift
+
+# ---- probe rewrite: fixed TEST-NET answer, always rendered by the template, so probes/health need no upstream
+app_adguard_probe_domain: probe.hm1.lox-internal.dev
+app_adguard_probe_answer: 192.0.2.53
+
+# ---- listen
+app_adguard_http_bind: 0.0.0.0
+app_adguard_http_port: 80
+app_adguard_bind_hosts:
+  - 0.0.0.0
+app_adguard_dns_port: 53
+
+# ---- upstreams
+app_adguard_upstream_mode: parallel
+app_adguard_upstreams:
+  - https://cloudflare-dns.com/dns-query
+  - https://dns.quad9.net/dns-query
+app_adguard_bootstrap:
+  - 1.1.1.1
+  - 9.9.9.9
+app_adguard_cache_size: 4194304
+
+# ---- query log / statistics retention
+app_adguard_querylog_interval: 168h
+app_adguard_stats_interval: 168h
+
+# ---- blocklists (id must be unique and stable; never reuse a retired id, a same-id URL swap keeps the old file)
+# Retired: id 2 (HaGeZi Multi PRO). Guests have 1 GiB. Do not add Threat Intelligence Feeds (tif.txt, ~1.95M rules).
+# All URLs are the AdGuard-hosted registry copies (Faris's choice).
+app_adguard_filters:
+  - id: 1
+    name: AdGuard DNS filter
+    url: https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+    enabled: true
+  - id: 3
+    name: Phishing URL Blocklist (PhishTank/OpenPhish)
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_30.txt
+    enabled: true
+  - id: 4
+    name: Malicious URL Blocklist (URLhaus)
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt
+    enabled: true
+  - id: 5
+    name: Stalkerware Indicators List
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_31.txt
+    enabled: true
+
+# ---- shared lists (empty today). Deployments add theirs in the *_extra variables (appended to these).
+app_adguard_rewrites: []          # [{domain: x.example, answer: 192.0.2.1, enabled: true}]
+app_adguard_user_rules: []        # AdGuard filtering rules, e.g. "||ads.example^"
+app_adguard_clients: []           # persistent clients in AdGuard's schema
+app_adguard_allowed_clients: []   # empty = everyone may query
+app_adguard_disallowed_clients: []
+app_adguard_rewrites_extra: []
+app_adguard_user_rules_extra: []
+app_adguard_clients_extra: []

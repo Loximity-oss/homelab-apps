@@ -1,0 +1,9 @@
+- name: restart resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
+
+- name: restart adguardhome
+  ansible.builtin.systemd:
+    name: AdGuardHome
+    state: restarted
