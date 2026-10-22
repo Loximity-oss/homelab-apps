@@ -4,7 +4,8 @@
 # This script (main's code) logs in to OpenBao (AppRole ci-apps), clones infra + standards main read-only, plans the
 # deployments, takes ALL host locks in one lock_hosts call (held for the whole run), and per wave: pre-deploy
 # snapshots (apply only), then once per app play: run dir /run/devops/apps/<run-id>/ (2750 setgid, group
-# runner-apps-play, umask 027), src/ copies without .git, inventory.yml, hosts, env, a child token minted with an
+# runner-apps-play, umask 027), src/ copies without .git (+ src/standards/protected.yaml), inventory.yml (every host
+# of the deployment), hosts (the selected ones = --limit), env, a child token minted with an
 # explicit -ttl (apply only; check mode writes an empty token file; verify writes none), an ssh-agent holding the ci-apps key, the deploy
 # guard, then `sudo /usr/local/sbin/apps-play-run <run-id>` (exit 2 = refused, stderr names the file). Class C.
 #
@@ -102,6 +103,8 @@ cat = catalog.load(base)
 specs = {s.get("hostname"): s for s in load_specs(infra)}
 out = {"waves": [], "notes": [], "errors": list(cat.errors)}
 deps = cat.deployments
+for d in deps:   # every host of the deployment, before HOSTS narrows the run: the play's inventory context
+    d["_all"] = list(d.get("hosts") or [])
 if event == "push":
     files = [l.strip() for l in open(changed_file) if l.strip()]
     allp, apps, keys = False, set(), set()
@@ -145,6 +148,7 @@ for d in deps:
         out["errors"].append(f"{d['_path']}: invalid wave {w!r} (stg = 1, others >= 2 and >= environments.yaml)")
         continue
     waves.setdefault(w, []).append({"app": d["app"], "zone": d["zone"], "path": d["_path"], "hosts": sorted(hs),
+                                    "all_hosts": sorted(h for h in d["_all"] if h in specs),
                                     "auto_rollback": bool(env.get("auto_rollback", False))})
 out["waves"] = [{"wave": w, "deployments": sorted(waves[w], key=lambda x: x["path"])} for w in sorted(waves)]
 print(json.dumps(out))
@@ -157,6 +161,9 @@ if [ -n "$(pj 'print("\n".join(d["errors"]))')" ]; then
 fi
 ALL_HOSTS=$(pj 'print(",".join(sorted({h for w in d["waves"] for x in w["deployments"] for h in x["hosts"]})))')
 if [ -z "$ALL_HOSTS" ]; then note "- Nothing to deploy."; cat "$REPORT"; exit 0; fi
+# every host of the selected deployments (inventory context: peers, cluster members, delegate_to targets); only
+# ALL_HOSTS are locked and targeted (--limit). Hosts outside ALL_HOSTS are reached only by read-only delegate_to.
+CTX_HOSTS=$(pj 'print(",".join(sorted({h for w in d["waves"] for x in w["deployments"] for h in x["all_hosts"]})))')
 
 # ---- host locks: every host of the run, one call, held until exit (proposal 2.3). verify called between apply waves
 # (APPS_LOCKS_HELD=1): the parent deploy already holds these hosts' locks; none are taken or released here.
@@ -170,10 +177,10 @@ else
 fi
 
 # ---- SSH host keys: runner-apps keeps its own known_hosts (TOFU once per IP via ssh-keyscan); hosts of a
-# dispatching infra PR are re-learned (the apply created/replaced them). The play gets only its hosts' lines.
+# dispatching infra PR are re-learned (the apply created/replaced them). The play gets its deployment's lines.
 KH="$HOME/.ssh/known_hosts_apps"; install -d -m 0700 "$HOME/.ssh"; [ -f "$KH" ] || install -m 0600 /dev/null "$KH"
 ip_of() { python3 -c 'import os,sys; sys.path.insert(0, os.path.join(sys.argv[1], "scripts")); from specs import load_specs; print(next(str(s["ip"]).split("/")[0] for s in load_specs(sys.argv[1]) if s.get("hostname") == sys.argv[2]))' "$INFRA" "$1"; }
-for h in ${ALL_HOSTS//,/ }; do
+for h in ${CTX_HOSTS//,/ }; do
   ip=$(ip_of "$h")
   if [ -n "$INFRA_PR" ] && [[ ",$HOSTS," == *",$h,"* ]]; then ssh-keygen -R "$ip" -f "$KH" >/dev/null 2>&1 || true; fi
   if ! ssh-keygen -F "$ip" -f "$KH" >/dev/null 2>&1; then
@@ -207,10 +214,13 @@ verify_issues() {   # app path hosts_csv log rc
   return 0
 }
 
-# ---- one app play (one deployment, its selected hosts)
+# ---- one app play (one deployment, its selected hosts). The inventory holds EVERY host of the deployment, so
+# groups['role_*'] and hostvars are the same whatever HOSTS selected: a single-host run renders like a full one
+# (k3s init host + keepalived peers + L4 node counts, AdGuard L4 peer checks). The wrapper turns the hosts file
+# (selected hosts only) into --limit, so only those are targeted; the guard checks every inventory host.
 FAILED=0
-run_play() {   # wave app zone path hosts_csv
-  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 rc=0 h ip rid ttl out
+run_play() {   # wave app zone path hosts_csv all_hosts_csv
+  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 allh=$6 rc=0 h ip rid ttl out
   rid="$(date +%s)$$$((RANDOM % 1000))"; RD="/run/devops/apps/$rid"
   install -d -m 2750 -g runner-apps-play "$RD"
   umask 027
@@ -219,17 +229,22 @@ run_play() {   # wave app zone path hosts_csv
   install -d -m 2750 "$RD/src" "$RD/src/apps" "$RD/src/infra"
   git -C "$BASE" archive --format=tar "$SHA" | tar -x -C "$RD/src/apps"     # no .git; a symlink makes the wrapper refuse
   git -C "$INFRA" archive --format=tar HEAD | tar -x -C "$RD/src/infra"
+  # protected.yaml for the play's own guard (deploy.yml/verify.yml read src/standards/protected.yaml; without it they
+  # only warn and rely on scripts/guard.py above). Plain file from standards main; the dir inherits the setgid group.
+  install -d -m 2750 "$RD/src/standards"; install -m 0640 "$STD/protected.yaml" "$RD/src/standards/protected.yaml"
   tr ',' '\n' <<<"$hosts" > "$RD/hosts"
   : > "$RD/known_hosts"
-  for h in ${hosts//,/ }; do ip=$(ip_of "$h"); ssh-keygen -F "$ip" -f "$KH" 2>/dev/null | grep -v '^#' >> "$RD/known_hosts" || true; done
-  if ! python3 - "$RD" "$INFRA" "$BASE" "$path" "$hosts" "$SHA" "$INFRA_SHA" > "$W/inv.err" 2>&1 <<'PY'
+  for h in ${allh//,/ }; do ip=$(ip_of "$h"); ssh-keygen -F "$ip" -f "$KH" 2>/dev/null | grep -v '^#' >> "$RD/known_hosts" || true; done
+  if ! python3 - "$RD" "$INFRA" "$BASE" "$path" "$hosts" "$SHA" "$INFRA_SHA" "$allh" > "$W/inv.err" 2>&1 <<'PY'
 import os, re, sys, yaml
-rd, infra, base, path, hosts, sha, infra_sha = sys.argv[1:8]
+rd, infra, base, path, hosts, sha, infra_sha, allh = sys.argv[1:9]
 sys.path.insert(0, os.path.join(infra, "scripts")); from specs import load_specs  # noqa: E402
 specs = {s.get("hostname"): s for s in load_specs(infra)}
 dep = yaml.safe_load(open(os.path.join(base, path), encoding="utf-8")) or {}
 _, zone, fn = path.split("/"); app = fn[:-5]
-hosts = hosts.split(",")
+hosts = allh.split(",")   # inventory = every deployment host with a spec; the selected ones are in rd/hosts
+if not set(sel := sys.argv[5].split(",")) <= set(hosts):
+    sys.exit(f"selected hosts {sel} not all in the deployment's hosts {hosts}")
 # 1.7: deployment vars -> group vars of deployment_<zone>_<app>; host_vars -> host vars, refused on inventory keys
 BANNED = re.compile(r"^(zone|vmid|role|type|os|keyctl|hostvars|group_names|groups|omit|environment|playbook_dir|role_path"
                     r"|inventory_.*|ansible_.*|bao_.*|delegate_.*|deploy_.*|apps_.*)$")
@@ -277,7 +292,7 @@ with open(os.path.join(rd, "inventory.yml"), "w", encoding="utf-8") as f:
 PY
   then note "  - ❌ $path: inventory refused: $(tail -1 "$W/inv.err" | tr -d '`')"; end_play; return 1; fi
   # deploy guard (main's scripts/guard.py) on the exact inventory values, before anything runs
-  local gargs=(); for h in ${hosts//,/ }; do gargs+=(--host "$h=$(ip_of "$h")"); done
+  local gargs=(); for h in ${allh//,/ }; do gargs+=(--host "$h=$(ip_of "$h")"); done
   if ! out=$(python3 "$BASE/scripts/guard.py" --infra "$RD/src/infra" --protected "$STD/protected.yaml" \
              --deployment "$RD/src/apps/$path" "${gargs[@]}" 2>&1); then
     note "  - ❌ $path: deploy guard refused"; note '```'; echo "$out" | tr -d '`' >> "$REPORT"; note '```'; end_play; return 1
@@ -331,15 +346,15 @@ for ((i = 0; i < NW; i++)); do
     if [ "$APPS_MODE" = verify ]; then note "- verify mode (L4, playbooks/verify.yml): no snapshot, no child token, no token file"
     else note "- check mode: no snapshot, no child token, no changes expected"; fi
   fi
-  while IFS=$'\t' read -r app zone path hosts rb; do
-    if ! run_play "$WAVE" "$app" "$zone" "$path" "$hosts"; then
+  while IFS=$'\t' read -r app zone path hosts allh rb; do
+    if ! run_play "$WAVE" "$app" "$zone" "$path" "$hosts" "$allh"; then
       FAILED=1
       if [ "$APPS_MODE" = apply ] && [ "$rb" = True ] && [ -n "$SNAP" ]; then   # environments.yaml auto_rollback (stg)
         PROXMOX_VE_API_TOKEN="$PVE_TOKEN" INFRA_ROOT="$INFRA" python3 "$INFRA/scripts/snapshot.py" rollback --name "$SNAP" --hosts "$hosts" > "$W/rb.txt" 2>&1 || true
         note "  - ↩️ auto-rollback to \`$SNAP\`:"; note '```'; tr -d '`' < "$W/rb.txt" >> "$REPORT"; note '```'
       fi
     fi
-  done < <(pj "[print('\t'.join([x['app'], x['zone'], x['path'], ','.join(x['hosts']), str(x['auto_rollback'])])) for x in d['waves'][$i]['deployments']]")
+  done < <(pj "[print('\t'.join([x['app'], x['zone'], x['path'], ','.join(x['hosts']), ','.join(x['all_hosts']), str(x['auto_rollback'])])) for x in d['waves'][$i]['deployments']]")
   [ $FAILED -eq 0 ] || { note "- ⛔ wave $WAVE failed: later waves not started"; break; }
   if [ "$APPS_MODE" = apply ]; then   # L4 of this wave before the next one (locks are held by this run)
     # EVENT=deploy: without it ci-verify.sh inherits our EVENT (push = refused; workflow_dispatch = APPS_LOCKS_HELD
