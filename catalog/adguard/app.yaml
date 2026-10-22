@@ -8,7 +8,7 @@ catalog:
   role: dns                      # role code(s) in standards naming/roles.yaml
   pattern: pair                  # single | pair | cluster (+ count); stg may use `single`
   os: [ubuntu]
-  size: {type: lxc, cores: 1, memory_mb: 1024, disk_gb: 8}
+  size: {type: lxc, cores: 1, memory_mb: 512, disk_gb: 8}
   ports: [53/udp, 53/tcp, 80/tcp]
   flows:
     - {from: self-zone, to: self, ports: [53/udp, 53/tcp]}     # clients of its own zone: same L2, no rule
