@@ -21,6 +21,7 @@ Design: homelab-infra `docs/proposals/homelab-apps/2-orchestration.md` (2.1 trig
 
 - Waves come from `environments.yaml`: stg 1, shr/int/wifi 2, iot 3, dmz 3.
 - Wave N+1 starts only when every host of wave N passed L4 and `wave_delay` (default 1 h) elapsed.
+- Time budget: a deployment may set `timeout_min` (5..240, default 60) for its play. Up to 120 is Class B, more is Class C. Before an apply run changes anything, `ci-deploy.sh` adds lock wait (60 min) + per wave 15 min slack + its plays' budgets + the wave delays; if that exceeds `APPS_RUN_MAX` (21600 s = the runner `timeout`, 6 h) the run is refused. The runner `timeout` is root-owned: a PR can ask for time under it, never raise it.
 - Inside a deployment, hosts go one at a time; the next starts after the previous passes `health`.
 - A failed wave stops the run, raises `pipeline.failed` and an `app-verify: <app>/<host>` issue. stg rolls back automatically; elsewhere the SRE restores from `pre-deploy_*` and a revert PR follows. `redeploy_app(app, from_wave=N)` resumes.
 

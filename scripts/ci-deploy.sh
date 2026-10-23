@@ -26,7 +26,8 @@
 #                          upserted on failure, closed when green
 #   APPS_LOCKS_HELD        verify only: 1 = the calling ci-deploy.sh (L4 between apply waves) holds these hosts' locks, so
 #                          lock_hosts is skipped (a second flock would wait on our own parent). Forced to 0 otherwise.
-#   APPS_TIMEOUT           s per app play, 60..14400 (default 3600)    APPS_TOKEN_TTL  child token TTL s (default 1800)
+#   APPS_TIMEOUT           s per app play, 60..14400 (default 3600; a deployment's `timeout_min` overrides it)
+#   APPS_RUN_MAX           s ceiling for the worst case of a whole apply run (default 21600 = runner timeout 6 h)    APPS_TOKEN_TTL  child token TTL s (default 1800)
 #   WAVE_DELAY             s between waves in apply mode (default 3600; 0 in check mode)
 #   APPS_SSH_KEY           private key of ci-apps (default ~/.ssh/ci-apps)
 # Exit: 0 = every selected play ok (or nothing to deploy); 1 = refused, lock timeout, guard refusal or a failed play.
@@ -48,6 +49,8 @@ APPS_LOCKS_HELD=${APPS_LOCKS_HELD:-0}
 [[ $HOSTS =~ ^[a-z0-9,-]*$ ]] && [[ $APPS =~ ^[a-z0-9,_-]*$ ]] && [[ $INFRA_PR =~ ^[0-9]*$ ]] && [[ $BEFORE =~ ^([0-9a-f]{40})?$ ]] || refuse "bad dispatch input"
 [[ $APPS_TIMEOUT =~ ^[0-9]{2,5}$ ]] && [ "$APPS_TIMEOUT" -ge 60 ] && [ "$APPS_TIMEOUT" -le 14400 ] || refuse "APPS_TIMEOUT 60..14400"
 [[ $APPS_TOKEN_TTL =~ ^[0-9]{2,5}$ ]] || refuse "APPS_TOKEN_TTL"
+APPS_RUN_MAX=${APPS_RUN_MAX:-21600}; LOCK_WAIT_S=3600; WAVE_SLACK_S=900   # run ceiling = runner `timeout` (6 h)
+[[ $APPS_RUN_MAX =~ ^[0-9]{3,6}$ ]] || refuse "APPS_RUN_MAX"
 if [ "$APPS_MODE" = apply ]; then WAVE_DELAY=${WAVE_DELAY:-3600}; else WAVE_DELAY=0; fi
 [[ $WAVE_DELAY =~ ^[0-9]+$ ]] || refuse "WAVE_DELAY"
 [ "$(git -C "$BASE" rev-parse HEAD)" = "$SHA" ] || refuse "checkout is not $SHA"
@@ -149,6 +152,7 @@ for d in deps:
         continue
     waves.setdefault(w, []).append({"app": d["app"], "zone": d["zone"], "path": d["_path"], "hosts": sorted(hs),
                                     "all_hosts": sorted(h for h in d["_all"] if h in specs),
+                                    "timeout_s": int(d["timeout_min"]) * 60 if d.get("timeout_min") else 0,
                                     "auto_rollback": bool(env.get("auto_rollback", False))})
 out["waves"] = [{"wave": w, "deployments": sorted(waves[w], key=lambda x: x["path"])} for w in sorted(waves)]
 print(json.dumps(out))
@@ -158,6 +162,21 @@ pj 'print("\n".join(d["notes"]))' | sed '/^$/d' | sed 's/^/- ⚠️ /' >> "$REPO
 if [ -n "$(pj 'print("\n".join(d["errors"]))')" ]; then
   note "- ❌ **Plan refused** (catalogue errors on main):"; pj 'print("\n".join(d["errors"]))' | sed 's/^/  - /' >> "$REPORT"
   cat "$REPORT"; exit 1
+fi
+# Worst case of the whole run (apply only): lock wait + per wave (snapshot/L4 slack + its plays' timeouts) + wave delays.
+# A run that cannot fit under the ceiling is refused before anything changes, not killed half way by the runner.
+if [ "$APPS_MODE" = apply ]; then
+  WORST=$(pj "
+t = $LOCK_WAIT_S
+for w in d['waves']:
+    t += $WAVE_SLACK_S + sum(x['timeout_s'] or $APPS_TIMEOUT for x in w['deployments'])
+t += max(len(d['waves']) - 1, 0) * $WAVE_DELAY
+print(t)")
+  if [ "$WORST" -gt "$APPS_RUN_MAX" ]; then
+    note "- ❌ **Run refused**: worst case ${WORST}s (lock wait + play timeouts + wave delays) exceeds the ${APPS_RUN_MAX}s ceiling; lower \`timeout_min\` or split the change"
+    cat "$REPORT"; exit 1
+  fi
+  note "- ⏱ worst case ${WORST}s of ${APPS_RUN_MAX}s"
 fi
 ALL_HOSTS=$(pj 'print(",".join(sorted({h for w in d["waves"] for x in w["deployments"] for h in x["hosts"]})))')
 if [ -z "$ALL_HOSTS" ]; then note "- Nothing to deploy."; cat "$REPORT"; exit 0; fi
@@ -219,8 +238,9 @@ verify_issues() {   # app path hosts_csv log rc
 # (k3s init host + keepalived peers + L4 node counts, AdGuard L4 peer checks). The wrapper turns the hosts file
 # (selected hosts only) into --limit, so only those are targeted; the guard checks every inventory host.
 FAILED=0
-run_play() {   # wave app zone path hosts_csv all_hosts_csv
-  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 allh=$6 rc=0 h ip rid ttl out
+run_play() {   # wave app zone path hosts_csv all_hosts_csv [timeout_s: deployment's timeout_min, 0 = APPS_TIMEOUT]
+  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 allh=$6 pto=${7:-0} rc=0 h ip rid ttl out
+  [ "$pto" -gt 0 ] || pto=$APPS_TIMEOUT
   rid="$(date +%s)$$$((RANDOM % 1000))"; RD="/run/devops/apps/$rid"
   install -d -m 2750 -g runner-apps-play "$RD"
   umask 027
@@ -299,7 +319,7 @@ PY
   fi
   # child token: this app only, explicit TTL (<= token role max); check mode needs none (bao_create_secret is a no-op)
   if [ "$APPS_MODE" = apply ]; then
-    ttl=$(( APPS_TOKEN_TTL < APPS_TIMEOUT ? APPS_TOKEN_TTL : APPS_TIMEOUT ))
+    ttl=$(( APPS_TOKEN_TTL < pto ? APPS_TOKEN_TTL : pto ))
     if ! parent_login 2> "$W/token.err"; then
       note "  - ❌ $path: AppRole ci-apps login failed: $(tail -1 "$W/token.err" | tr -d '`')"; end_play; return 1
     fi
@@ -310,9 +330,9 @@ PY
   # verify: NO token file at all (apps-play-run refuses a verify run dir that has one, exit 2; infra #147)
   [ "$APPS_MODE" = verify ] || printf '%s' "$CHILD" > "$RD/token"
   printf 'APPS_APP=%s\nAPPS_MODE=%s\nAPPS_TIMEOUT=%s\nAPPS_WAVE=%s\nBAO_ZONE_MODE=namespace\nANSIBLE_FORCE_COLOR=0\nANSIBLE_STDOUT_CALLBACK=default\n' \
-    "$app" "$APPS_MODE" "$APPS_TIMEOUT" "$wave" > "$RD/env"
+    "$app" "$APPS_MODE" "$pto" "$wave" > "$RD/env"
   # ssh-agent for this play only; -t = play timeout, so a missed cleanup still expires the key
-  out=$(ssh-agent -s -a "$RD/agent.sock" -t "$APPS_TIMEOUT") || { note "  - ❌ $path: ssh-agent failed"; end_play; return 1; }
+  out=$(ssh-agent -s -a "$RD/agent.sock" -t "$pto") || { note "  - ❌ $path: ssh-agent failed"; end_play; return 1; }
   AGENT_PID=$(sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p' <<<"$out"); echo "$AGENT_PID" > "$RD/agent.pid"
   chmod 0660 "$RD/agent.sock"
   SSH_AUTH_SOCK="$RD/agent.sock" ssh-add -q "$APPS_SSH_KEY" 2> "$W/agent.err" || { note "  - ❌ $path: ci-apps key not loaded"; end_play; return 1; }
@@ -346,15 +366,15 @@ for ((i = 0; i < NW; i++)); do
     if [ "$APPS_MODE" = verify ]; then note "- verify mode (L4, playbooks/verify.yml): no snapshot, no child token, no token file"
     else note "- check mode: no snapshot, no child token, no changes expected"; fi
   fi
-  while IFS=$'\t' read -r app zone path hosts allh rb; do
-    if ! run_play "$WAVE" "$app" "$zone" "$path" "$hosts" "$allh"; then
+  while IFS=$'\t' read -r app zone path hosts allh rb pto; do
+    if ! run_play "$WAVE" "$app" "$zone" "$path" "$hosts" "$allh" "$pto"; then
       FAILED=1
       if [ "$APPS_MODE" = apply ] && [ "$rb" = True ] && [ -n "$SNAP" ]; then   # environments.yaml auto_rollback (stg)
         PROXMOX_VE_API_TOKEN="$PVE_TOKEN" INFRA_ROOT="$INFRA" python3 "$INFRA/scripts/snapshot.py" rollback --name "$SNAP" --hosts "$hosts" > "$W/rb.txt" 2>&1 || true
         note "  - ↩️ auto-rollback to \`$SNAP\`:"; note '```'; tr -d '`' < "$W/rb.txt" >> "$REPORT"; note '```'
       fi
     fi
-  done < <(pj "[print('\t'.join([x['app'], x['zone'], x['path'], ','.join(x['hosts']), ','.join(x['all_hosts']), str(x['auto_rollback'])])) for x in d['waves'][$i]['deployments']]")
+  done < <(pj "[print('\t'.join([x['app'], x['zone'], x['path'], ','.join(x['hosts']), ','.join(x['all_hosts']), str(x['auto_rollback']), str(x['timeout_s'])])) for x in d['waves'][$i]['deployments']]")
   [ $FAILED -eq 0 ] || { note "- ⛔ wave $WAVE failed: later waves not started"; break; }
   if [ "$APPS_MODE" = apply ]; then   # L4 of this wave before the next one (locks are held by this run)
     # EVENT=deploy: without it ci-verify.sh inherits our EVENT (push = refused; workflow_dispatch = APPS_LOCKS_HELD

@@ -25,7 +25,7 @@ jobs:
   deploy:
     if: gitea.ref == 'refs/heads/main'
     runs-on: host-apps
-    timeout-minutes: 240 # > host lock wait (60 min) + the longest wave set (proposal 2.3)
+    timeout-minutes: 360 # = APPS_RUN_MAX (6 h): lock wait + the longest wave set, checked up front by ci-deploy.sh
     steps:
       - name: deploy (apply mode)
         env:

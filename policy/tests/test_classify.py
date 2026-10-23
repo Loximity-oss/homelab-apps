@@ -152,6 +152,12 @@ class DeployLeaves(Base):
 
     def test_c(self):
         self.assertEqual(self.dep(DEP.replace("wave: 2", "wave: 1")), "C")
+
+    def test_timeout_min(self):
+        self.assertEqual(self.dep(DEP + "timeout_min: 90\n"), "B")
+        self.assertEqual(self.dep(DEP + "timeout_min: 120\n"), "B")
+        self.assertEqual(self.dep(DEP + "timeout_min: 180\n"), "C")
+        self.assertEqual(self.dep(DEP + "timeout_min: true\n"), "C")
         self.assertEqual(self.dep(DEP.replace("hm1-wifi-dns01", "hm1-wifi-dns02")), "C")
         self.assertEqual(self.dep(DEP + "zone: iot\n"), "C")
         self.assertEqual(self.dep(DEP + "canary_waiver: true\n"), "C")

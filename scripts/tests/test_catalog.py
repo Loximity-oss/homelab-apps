@@ -24,6 +24,12 @@ class CatalogTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_timeout_min(self):
+        for v, ok in (("45", True), ("5", True), ("240", True), ("4", False), ("241", False), ("true", False), ("'30'", False)):
+            write(self.root, "deployments/wifi/adguard.yaml",
+                  f"app: adguard\nhosts: [hm1-wifi-dns01]\ntimeout_min: {v}\n")
+            self.assertEqual(not catalog.load(self.root).errors, ok, v)
+
     def test_valid(self):
         write(self.root, "deployments/wifi/adguard.yaml",
               "app: adguard\nhosts: [hm1-wifi-dns01, hm1-wifi-dns02]\n")
