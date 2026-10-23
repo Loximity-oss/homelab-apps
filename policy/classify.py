@@ -28,6 +28,7 @@ DEPLOYMENT = "deployments/*/*.yaml"
 B_APP_LEAVES = [("catalog", "summary"), ("owner",), ("catalog", "size"), ("catalog", "os"),
                 ("catalog", "ports"), ("rollout", "serial"), ("rollout", "order")]
 B_DEPLOY_LEAVES = [("vars",), ("host_vars",), ("pin_until",)]
+TIMEOUT_B_MAX_MIN = 120
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$")
 _MISSING = object()
 
@@ -205,6 +206,10 @@ def judge_deployment(base, head, head_app):
             ok = all(isinstance(x, int) and not isinstance(x, bool) and x >= 2
                      for x in (base.get("wave"), head.get("wave")))
             out.append(("B" if ok else "C", f"wave {base.get('wave')} -> {head.get('wave')}"))
+        elif p == ("timeout_min",):   # play time budget: <= 2 h is ordinary (B), longer needs Faris
+            vals = [x for x in (base.get("timeout_min"), head.get("timeout_min")) if x is not None]
+            ok = all(isinstance(x, int) and not isinstance(x, bool) and x <= TIMEOUT_B_MAX_MIN for x in vals)
+            out.append(("B" if ok else "C", f"timeout_min {base.get('timeout_min')} -> {head.get('timeout_min')}"))
         elif p == ("version",):
             kh = _known(head_app)
             old, new = base.get("version"), head.get("version")

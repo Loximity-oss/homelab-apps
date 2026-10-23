@@ -121,6 +121,9 @@ def load(root="."):
                             cat.errors.append(f"{rel}: invalid host '{h}'")
                         elif h.split("-")[1] != zone:
                             cat.errors.append(f"{rel}: host '{h}' not in zone '{zone}'")
+                tm = data.get("timeout_min")
+                if tm is not None and (isinstance(tm, bool) or not isinstance(tm, int) or not 5 <= tm <= 240):
+                    cat.errors.append(f"{rel}: timeout_min must be an integer 5..240 (minutes per play), got {tm!r}")
                 data["_path"] = rel
                 cat.deployments.append(data)
 
