@@ -240,7 +240,7 @@
 
     - name: L4 failed checks
       ansible.builtin.debug:
-        msg: "{{ apps_l4.stdout_lines | select('search', 'Failed|Count:|Expected|Actual') | list }}"
+        msg: "{{ apps_l4.stdout_lines | select('search', ':$|Failed|Count:|Expected|Actual') | list }}"
       when: apps_l4.rc is defined and apps_l4.rc != 0
 
     - name: Verdict (a failing host ends the run red; ci-deploy.sh opens the app-verify issue)
@@ -255,5 +255,6 @@
           verify failed on {{ inventory_hostname }}: health services {{ apps_health_svc.results | default([]) | selectattr('rc', 'ne', 0) | map(attribute='item') | list }},
           health command rc={{ apps_health_cmd.rc | default('n/a') }},
           goss {{ 'present' if (apps_goss.stat.exists and apps_goss.stat.executable) else 'MISSING on the guest (run the infra L3 verification first)' }},
-          L4 rc={{ apps_l4.rc | default('not run') }}
+          L4 rc={{ apps_l4.rc | default('not run') }},
+          L4 failed checks {{ (apps_l4.stdout | default('')).split('Failures/Skipped:') | last | regex_findall('(?m)^[A-Za-z]+: .*:$') }}
         success_msg: "verify passed on {{ inventory_hostname }}"
