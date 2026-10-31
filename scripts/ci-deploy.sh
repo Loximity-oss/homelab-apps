@@ -7,7 +7,7 @@
 # runner-apps-play, umask 027), src/ copies without .git (+ src/standards/protected.yaml), inventory.yml (every host
 # of the deployment), hosts (the selected ones = --limit), env, a child token minted with an
 # explicit -ttl (apply only; check mode writes an empty token file; verify writes none), an ssh-agent holding the ci-apps key, the deploy
-# guard, then `sudo /usr/local/sbin/apps-play-run <run-id>` (exit 2 = refused, stderr names the file). Class C.
+# guard, then `sudo /usr/local/sbin/apps-play-run <run-id>` (exit 2 before its start line = refused, stderr names the file). Class C.
 #
 # Entry point:  scripts/ci-deploy.sh        (no arguments; environment set by .gitea/workflows/deploy.yml)
 #   SERVER, REPO           Gitea base URL, homelab/homelab-apps
@@ -239,7 +239,7 @@ verify_issues() {   # app path hosts_csv log rc
 # (selected hosts only) into --limit, so only those are targeted; the guard checks every inventory host.
 FAILED=0
 run_play() {   # wave app zone path hosts_csv all_hosts_csv [timeout_s: deployment's timeout_min, 0 = APPS_TIMEOUT]
-  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 allh=$6 pto=${7:-0} rc=0 h ip rid ttl out
+  local wave=$1 app=$2 zone=$3 path=$4 hosts=$5 allh=$6 pto=${7:-0} rc=0 refused=0 h ip rid ttl out
   [ "$pto" -gt 0 ] || pto=$APPS_TIMEOUT
   rid="$(date +%s)$$$((RANDOM % 1000))"; RD="/run/devops/apps/$rid"
   install -d -m 2750 -g runner-apps-play "$RD"
@@ -337,12 +337,15 @@ PY
   chmod 0660 "$RD/agent.sock"
   SSH_AUTH_SOCK="$RD/agent.sock" ssh-add -q "$APPS_SSH_KEY" 2> "$W/agent.err" || { note "  - ❌ $path: ci-apps key not loaded"; end_play; return 1; }
   sudo -n /usr/local/sbin/apps-play-run "$rid" > "$W/play-$rid.log" 2>&1 || rc=$?
-  case $rc in
-    0) note "  - ✅ $path ($hosts): $(grep -E '^[a-z0-9-]+ +: ok=' "$W/play-$rid.log" | sed 's/  */ /g' | paste -sd';' - | tr -d '`')" ;;
-    2) note "  - ❌ $path: **apps-play-run refused** the run dir"; note '```'; grep 'refused' "$W/play-$rid.log" | tail -3 | tr -d '`' >> "$REPORT"; note '```' ;;
+  # The wrapper exits 2 when it refuses, but it also passes on the play's rc, and ansible-playbook exits 2 when a host
+  # failed. It prints its start line only after every check, so a refusal is rc 2 without that line (infra #201).
+  if [ "$rc" = 2 ] && ! grep -q "^apps-play-run: apps-play-$rid " "$W/play-$rid.log"; then refused=1; fi
+  case $rc,$refused in
+    0,0) note "  - ✅ $path ($hosts): $(grep -E '^[a-z0-9-]+ +: ok=' "$W/play-$rid.log" | sed 's/  */ /g' | paste -sd';' - | tr -d '`')" ;;
+    2,1) note "  - ❌ $path: **apps-play-run refused** the run dir"; note '```'; grep 'refused' "$W/play-$rid.log" | tail -3 | tr -d '`' >> "$REPORT"; note '```' ;;
     *) note "  - ❌ $path ($hosts): play failed rc=$rc"; note '```'; tail -40 "$W/play-$rid.log" | tr -d '`' >> "$REPORT"; note '```' ;;
   esac
-  if [ "$APPS_MODE" = verify ] && [ "$rc" != 2 ]; then verify_issues "$app" "$path" "$hosts" "$W/play-$rid.log" "$rc"; fi
+  if [ "$APPS_MODE" = verify ] && [ "$refused" = 0 ]; then verify_issues "$app" "$path" "$hosts" "$W/play-$rid.log" "$rc"; fi
   cat "$W/play-$rid.log"
   end_play
   return $(( rc == 0 ? 0 : 1 ))
