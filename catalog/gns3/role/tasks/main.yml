@@ -176,6 +176,11 @@
   check_mode: false
   no_log: true
 
+- name: Admin password fact
+  ansible.builtin.set_fact:
+    _gns3_admin_pass: "{{ _gns3_pass.content | default('') | b64decode | trim }}"
+  no_log: true
+
 - name: Escrow marker
   ansible.builtin.stat:
     path: "{{ app_gns3_escrow_marker }}"
@@ -193,7 +198,7 @@
         keys: [username, password]
         data:
           username: "{{ app_gns3_admin_user }}"
-          password: "{{ _gns3_pass.content | default('') | b64decode | trim }}"
+          password: "{{ _gns3_admin_pass }}"
 
     # status exists = stored but the marker is gone (run died between write and marker, or guest rebuilt): a human decides (runbook)
     - name: The write created the secret (or check mode)

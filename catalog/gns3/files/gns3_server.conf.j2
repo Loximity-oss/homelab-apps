@@ -10,7 +10,7 @@ secrets_dir = {{ app_gns3_conf_dir }}
 
 [Controller]
 default_admin_username = {{ app_gns3_admin_user }}
-default_admin_password = {{ _gns3_pass.content | default('') | b64decode | trim }}
+default_admin_password = {{ _gns3_admin_pass }}
 
 [Qemu]
 enable_hardware_acceleration = True
