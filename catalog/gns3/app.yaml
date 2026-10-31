@@ -1,0 +1,47 @@
+# GNS3 server catalogue entry (network lab host). Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5.
+# Server 3.0.6 (latest stable of the 3.x line, PyPI wheel, Python 3.14 supported); ubridge is a second pinned artefact held in
+# role/defaults (app_gns3_ubridge_*), because the catalogue pins one artefact per entry.
+name: gns3
+owner: oc-cfg
+catalog:
+  status: beta                   # example | beta (stg only) | stable | deprecated
+  summary: GNS3 network lab server (controller + local compute, QEMU/KVM, Docker, Dynamips, VPCS, ubridge)
+  role: net                      # role code in standards naming/roles.yaml (role_apps mapping net -> gns3 still to be added)
+  pattern: single
+  os: [ubuntu]
+  size: {type: vm, cores: 10, memory_mb: 12288, disk_gb: 80, datastore: lvmt-sata01}   # equals the existing spec of hm1-stg-net01; cpu_type host + extra_nics are guest-spec items (infra)
+  ports: [3080/tcp, 5000-5099/tcp]
+  flows:
+    - {from: tru, to: self, ports: [3080/tcp, 5000-5099/tcp]}   # Faris admin clients: web UI/API and node consoles (flows.yaml tru-gns3-ui)
+    - {from: self, to: internet, ports: [80/tcp, 443/tcp, 53/udp, 53/tcp]}   # apt, PyPI, GitHub (ubridge source), container registries
+    - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
+    # probe flow (CT 301 -> self :3080) is derived from probes, never hand-listed
+    # no OpenBao flow: the credential escrow runs on CT 300 via bao_create_secret, never from the guest
+  secrets:
+    # admin credentials: generated on the guest at first deploy (root-only file), escrowed once into OpenBao (create-only)
+    - {path: "<zone>/secret/apps/gns3/<host>", keys: [username, password], by: role}
+version:
+  pin: "3.0.6"
+  known:                         # every version a deployment may pin, with its sha256 (PyPI JSON API digests of the wheel)
+    "3.0.6": 6293f06431135305a18323cb893f69395d84470818ac5711360433bc01b38bc9
+  source: pypi:gns3-server
+  url: "https://files.pythonhosted.org/packages/py3/g/gns3-server/gns3_server-{version}-py3-none-any.whl"
+  vars: {version: app_gns3_version, url: app_gns3_url, sha256: app_gns3_sha256}
+  bump_class: B
+rollout:
+  serial: 1
+  order: sorted
+  stop_on_failure: true
+  health_between_hosts: true
+  groups: []
+health:                          # plain shell on the guest, exit 0 = healthy, no secrets, hard timeout
+  services: [gns3-server, docker]
+  command: "curl -fsS --max-time 5 http://127.0.0.1:3080/v3/version | grep -q '\"version\"'"
+  timeout_s: 30
+reboot:
+  policy: single
+  timeout_s: 600
+probes:
+  - {name: api, module: http_2xx, port: 3080, path: /v3/version}
+tests: tests/l4.goss.yaml.j2
+drift: {in_l4: false}

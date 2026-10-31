@@ -1,0 +1,19 @@
+# Managed by homelab-apps (catalog/gns3).
+[Unit]
+Description=GNS3 server
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ app_gns3_user }}
+Group={{ app_gns3_user }}
+Environment=HOME={{ app_gns3_home }}
+WorkingDirectory={{ app_gns3_home }}
+ExecStart={{ app_gns3_venv }}/bin/gns3server --config {{ app_gns3_conf }}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

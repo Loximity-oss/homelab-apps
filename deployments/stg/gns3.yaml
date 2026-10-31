@@ -1,0 +1,11 @@
+# GNS3 server on the stg network lab VM (infra #195). Wave 1 per environments.yaml (status beta = stg only).
+# Shared config comes from catalog/gns3/role/defaults; the lab NICs are left to GNS3.
+app: gns3
+zone: stg
+hosts: [hm1-stg-net01]
+version: catalog
+pin_until: null
+wave: 1
+pattern: null
+vars: {}
+host_vars: {}

@@ -1,0 +1,254 @@
+# GNS3 server 3.x, native install (no container). Order: packages -> KVM check -> service user -> ubridge -> venv + wheel ->
+# admin password (generated on the guest, escrowed once) -> config -> unit -> service -> healthcheck.
+# The extra lab NICs (net1..net9, vmbr10..vmbr18) are left untouched: GNS3/QEMU attach to them later.
+# Check mode (lint gate 5.1): read-only tasks carry check_mode: false + changed_when: false.
+- name: Packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - libpcap-dev
+      - libcap2-bin
+      - python3-venv
+      - python3-dev
+      - openssl
+      - curl
+      - ca-certificates
+      - qemu-system-x86
+      - qemu-utils
+      - dynamips
+      - vpcs
+      - docker.io
+      - bridge-utils
+      - cpulimit
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+
+- name: KVM device present
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: _gns3_kvm
+
+- name: Nested virtualisation is on (guest spec cpu_type host)
+  ansible.builtin.assert:
+    that:
+      - _gns3_kvm.stat.exists
+    fail_msg: "/dev/kvm is missing: the guest needs cpu_type host and nested virtualisation on the Proxmox host (infra guest spec)"
+
+- name: Docker enabled and running
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# ---- Service user (kvm for QEMU, docker for Docker nodes; ubridge gets its rights from file capabilities)
+- name: Service user
+  ansible.builtin.user:
+    name: "{{ app_gns3_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ app_gns3_home }}"
+    create_home: true
+    groups: [kvm, docker]
+    append: true
+
+- name: Home directory
+  ansible.builtin.file:
+    path: "{{ app_gns3_home }}"
+    state: directory
+    owner: "{{ app_gns3_user }}"
+    group: "{{ app_gns3_user }}"
+    mode: "0750"
+
+- name: Config directory (service user writes controller vars and JWT key here)
+  ansible.builtin.file:
+    path: "{{ app_gns3_conf_dir }}"
+    state: directory
+    owner: "{{ app_gns3_user }}"
+    group: "{{ app_gns3_user }}"
+    mode: "0700"
+
+- name: Hash and marker directory
+  ansible.builtin.file:
+    path: /etc/hm1
+    state: directory
+    mode: "0700"
+
+- name: Install directory
+  ansible.builtin.file:
+    path: "{{ app_gns3_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# ---- ubridge: build once per pinned version, setcap via `make install`
+- name: ubridge build marker
+  ansible.builtin.stat:
+    path: "{{ app_gns3_ubridge_marker }}"
+  register: _gns3_ubridge
+
+- name: Download, build and install ubridge
+  when: not _gns3_ubridge.stat.exists
+  block:
+    - name: Download ubridge source (sha256 pinned)
+      ansible.builtin.get_url:
+        url: "{{ app_gns3_ubridge_url }}"
+        dest: "/var/cache/ubridge-{{ app_gns3_ubridge_version }}.tar.gz"
+        checksum: "sha256:{{ app_gns3_ubridge_sha256 }}"
+        mode: "0644"
+
+    - name: Source directory
+      ansible.builtin.file:
+        path: "{{ app_gns3_ubridge_src }}"
+        state: directory
+        mode: "0755"
+
+    - name: Unpack source
+      ansible.builtin.unarchive:
+        src: "/var/cache/ubridge-{{ app_gns3_ubridge_version }}.tar.gz"
+        dest: "{{ app_gns3_ubridge_src }}"
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+
+    - name: Build and install (make install copies to /usr/local/bin and sets cap_net_admin,cap_net_raw)
+      ansible.builtin.command:
+        argv: [make, install]
+        chdir: "{{ app_gns3_ubridge_src }}"
+      changed_when: true
+
+    - name: Record the build
+      ansible.builtin.copy:
+        dest: "{{ app_gns3_ubridge_marker }}"
+        content: "ubridge {{ app_gns3_ubridge_version }} installed\n"
+        mode: "0600"
+
+# ---- GNS3 server in a venv from the sha256-pinned wheel (dependencies come from PyPI at the versions the wheel pins)
+- name: Create the venv
+  ansible.builtin.command:
+    argv: [python3, -m, venv, "{{ app_gns3_venv }}"]
+    creates: "{{ app_gns3_venv }}/bin/pip"
+
+- name: Installed server version
+  ansible.builtin.command: "{{ app_gns3_venv }}/bin/gns3server --version"
+  register: _gns3_ver
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Download and install the wheel
+  when: (_gns3_ver.stdout | default('') | trim) != app_gns3_version
+  block:
+    - name: Wheel cache directory
+      ansible.builtin.file:
+        path: /var/cache/gns3
+        state: directory
+        mode: "0755"
+
+    - name: Download wheel (sha256 pinned; the file name must stay the wheel name)
+      ansible.builtin.get_url:
+        url: "{{ app_gns3_url }}"
+        dest: "/var/cache/gns3/{{ app_gns3_wheel }}"
+        checksum: "sha256:{{ app_gns3_sha256 }}"
+        mode: "0644"
+
+    - name: Install into the venv
+      ansible.builtin.pip:
+        name: "/var/cache/gns3/{{ app_gns3_wheel }}"
+        virtualenv: "{{ app_gns3_venv }}"
+      notify: restart gns3 server
+
+# ---- Admin credentials. GNS3 3.x ships admin/admin; the password is generated here, kept in a root-only file (the
+# config needs it in clear), and escrowed once in OpenBao (create-only, via bao_create_secret on the controller).
+- name: Generate the admin password once (root-only file)
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 16 > {{ app_gns3_pass_file }}"
+  args:
+    creates: "{{ app_gns3_pass_file }}"
+  no_log: true
+
+- name: Read the admin password
+  ansible.builtin.slurp:
+    src: "{{ app_gns3_pass_file }}"
+  register: _gns3_pass
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Escrow marker
+  ansible.builtin.stat:
+    path: "{{ app_gns3_escrow_marker }}"
+  register: _gns3_escrow
+
+- name: Store the admin credentials once
+  when: not _gns3_escrow.stat.exists
+  no_log: true
+  block:
+    - name: Write once to OpenBao (create-only)
+      ansible.builtin.include_role:
+        name: bao_create_secret
+      vars:
+        path: "<zone>/secret/apps/gns3/<host>"
+        keys: [username, password]
+        data:
+          username: "{{ app_gns3_admin_user }}"
+          password: "{{ _gns3_pass.content | default('') | b64decode | trim }}"
+
+    # status exists = stored but the marker is gone (run died between write and marker, or guest rebuilt): a human decides (runbook)
+    - name: The write created the secret (or check mode)
+      ansible.builtin.assert:
+        that:
+          - bao_create_secret_result.status in ['created', 'check']
+        fail_msg: "GNS3 credential escrow: the secret already exists in OpenBao but the marker is missing (see runbook, Admin password)"
+
+    - name: Marker (after the successful write only)
+      ansible.builtin.copy:
+        dest: "{{ app_gns3_escrow_marker }}"
+        content: "stored in OpenBao {{ zone }}/secret/apps/gns3/{{ inventory_hostname }}\n"
+        mode: "0600"
+
+# ---- Config and service
+- name: Render config (holds the admin password)
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/gns3_server.conf.j2"
+    dest: "{{ app_gns3_conf }}"
+    owner: "{{ app_gns3_user }}"
+    group: "{{ app_gns3_user }}"
+    mode: "0600"
+  no_log: true
+  notify: restart gns3 server
+
+- name: Systemd unit
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/gns3-server.service.j2"
+    dest: /etc/systemd/system/gns3-server.service
+    mode: "0644"
+  register: _gns3_unit
+  notify: restart gns3 server
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _gns3_unit.changed
+
+- name: Enabled and running
+  ansible.builtin.systemd:
+    name: gns3-server
+    enabled: true
+    state: started
+
+- name: Apply restarts now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Healthcheck: /v3/version is public
+- name: Healthcheck API
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_gns3_port }}/v3/version"
+    status_code: [200]
+  register: _gns3_hc
+  retries: 20
+  delay: 3
+  until: _gns3_hc.status == 200
+  changed_when: false
+  check_mode: false

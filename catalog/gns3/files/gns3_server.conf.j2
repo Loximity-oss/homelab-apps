@@ -1,0 +1,17 @@
+# Managed by homelab-apps (catalog/gns3). Manual edits are overwritten at the next deploy.
+# GNS3 3.x config: INI sections become ServerConfig settings; keys verified against 3.0.6 on hm1-stg-net01.
+[Server]
+host = {{ app_gns3_host }}
+port = {{ app_gns3_port }}
+console_start_port_range = {{ app_gns3_console_start }}
+console_end_port_range = {{ app_gns3_console_end }}
+ubridge_path = {{ app_gns3_ubridge_path }}
+secrets_dir = {{ app_gns3_conf_dir }}
+
+[Controller]
+default_admin_username = {{ app_gns3_admin_user }}
+default_admin_password = {{ _gns3_pass.content | default('') | b64decode | trim }}
+
+[Qemu]
+enable_hardware_acceleration = True
+require_hardware_acceleration = {{ 'True' if app_gns3_require_kvm else 'False' }}
