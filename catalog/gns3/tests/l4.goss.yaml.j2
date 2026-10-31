@@ -14,7 +14,7 @@ service:
     running: true
 command:
   app-gns3-listen:
-    exec: 'n=$(ss -Hltnp "sport = :{{ port }}" | grep -c python); echo "gns3 tcp/{{ port }} listeners: $n"; test "$n" -gt 0'
+    exec: 'n=$(ss -Hltnp "sport = :{{ port }}" | grep -c gns3server); echo "gns3server tcp/{{ port }} listeners: $n"; test "$n" -gt 0'
     exit-status: 0
   app-gns3-version:
     exec: 'v=$(curl -s --max-time 5 http://127.0.0.1:{{ port }}/v3/version); echo "$v"; echo "$v" | grep -q "\"version\":\"{{ app_gns3_version | default("3.0.6") }}\""'
@@ -29,8 +29,8 @@ command:
     exec: 'c=$(getcap {{ ubridge }}); echo "$c"; echo "$c" | grep -q cap_net_raw'
     exit-status: 0
   app-gns3-kvm-access:
-    exec: 'runuser -u {{ user }} -- sh -c "test -r /dev/kvm && test -w /dev/kvm"; echo "kvm access of {{ user }} rc=$?"'
+    exec: 'runuser -u {{ user }} -- sh -c "test -r /dev/kvm && test -w /dev/kvm"; rc=$?; echo "kvm access of {{ user }} rc=$rc"; test "$rc" -eq 0'
     exit-status: 0
   app-gns3-emulators:
-    exec: 'command -v qemu-system-x86_64 dynamips vpcs; test $(command -v qemu-system-x86_64 dynamips vpcs | wc -l) -eq 3'
+    exec: 'for b in qemu-system-x86_64 dynamips vpcs; do command -v "$b" || { echo "missing: $b"; exit 1; }; done'
     exit-status: 0
