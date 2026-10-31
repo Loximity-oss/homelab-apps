@@ -1,0 +1,36 @@
+# L4 app checks for GNS3 on {{ inventory_hostname }}. Read-only, loopback only, no credentials.
+# Role defaults may not be loaded when this renders, so every value has the same literal as fallback (keep in sync
+# with role/defaults/main.yml).
+{% set port = app_gns3_port | default(3080) %}
+{% set venv = app_gns3_venv | default('/opt/gns3/venv') %}
+{% set ubridge = app_gns3_ubridge_path | default('/usr/local/bin/ubridge') %}
+{% set user = app_gns3_user | default('gns3') %}
+service:
+  gns3-server:
+    enabled: true
+    running: true
+  docker:
+    enabled: true
+    running: true
+command:
+  app-gns3-listen:
+    exec: 'n=$(ss -Hltnp "sport = :{{ port }}" | grep -c python); echo "gns3 tcp/{{ port }} listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-gns3-version:
+    exec: 'v=$(curl -s --max-time 5 http://127.0.0.1:{{ port }}/v3/version); echo "$v"; echo "$v" | grep -q "\"version\":\"{{ app_gns3_version | default("3.0.6") }}\""'
+    exit-status: 0
+  app-gns3-auth-required:
+    exec: 'c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:{{ port }}/v3/projects); echo "unauthenticated projects HTTP $c"; test "$c" = 401'
+    exit-status: 0
+  app-gns3-default-login-rejected:
+    exec: 'c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -X POST -d "username=admin&password=admin" http://127.0.0.1:{{ port }}/v3/access/users/login); echo "default admin/admin login HTTP $c"; test "$c" = 401'
+    exit-status: 0
+  app-gns3-ubridge-caps:
+    exec: 'c=$(getcap {{ ubridge }}); echo "$c"; echo "$c" | grep -q cap_net_raw'
+    exit-status: 0
+  app-gns3-kvm-access:
+    exec: 'runuser -u {{ user }} -- sh -c "test -r /dev/kvm && test -w /dev/kvm"; echo "kvm access of {{ user }} rc=$?"'
+    exit-status: 0
+  app-gns3-emulators:
+    exec: 'command -v qemu-system-x86_64 dynamips vpcs; test $(command -v qemu-system-x86_64 dynamips vpcs | wc -l) -eq 3'
+    exit-status: 0

@@ -1,0 +1,4 @@
+- name: restart gns3 server
+  ansible.builtin.systemd:
+    name: gns3-server
+    state: restarted

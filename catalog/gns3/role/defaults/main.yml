@@ -1,0 +1,38 @@
+# Shared defaults for every GNS3 deployment. Per-zone or per-host values: deployments/<zone>/gns3.yaml `vars` / `host_vars`.
+# No secrets here: the admin password is generated on the guest and escrowed in OpenBao.
+
+# ---- structural
+# version, url and sha256 are set at deploy time from catalog version.pin / known / url (version.vars); these are fallbacks
+app_gns3_version: "3.0.6"
+app_gns3_sha256: 6293f06431135305a18323cb893f69395d84470818ac5711360433bc01b38bc9
+app_gns3_url: "https://files.pythonhosted.org/packages/py3/g/gns3-server/gns3_server-{{ app_gns3_version }}-py3-none-any.whl"
+app_gns3_wheel: "gns3_server-{{ app_gns3_version }}-py3-none-any.whl"
+app_gns3_user: gns3
+app_gns3_dir: /opt/gns3
+app_gns3_venv: "{{ app_gns3_dir }}/venv"
+app_gns3_home: /var/lib/gns3
+# config dir is writable by the service user: the server writes its controller vars file and JWT secret key next to the config
+app_gns3_conf_dir: "{{ app_gns3_home }}/conf"
+app_gns3_conf: "{{ app_gns3_conf_dir }}/gns3_server.conf"
+app_gns3_admin_user: admin
+# root-only plaintext of the generated admin password (GNS3 reads it from its config on the first start) and the escrow marker
+app_gns3_pass_file: /etc/hm1/gns3-admin.pass
+app_gns3_escrow_marker: /etc/hm1/gns3-escrow.done
+
+# ---- ubridge: built from the GitHub tag (not in the Ubuntu archive); sha256 of the tag tarball
+app_gns3_ubridge_version: "1.3.1"
+app_gns3_ubridge_sha256: 27e5d2514830b9f8a8a682e9ef10a8e60bc7ed831a6d3328605467d46b896ab4
+app_gns3_ubridge_url: "https://github.com/GNS3/ubridge/archive/refs/tags/v{{ app_gns3_ubridge_version }}.tar.gz"
+app_gns3_ubridge_src: "/usr/local/src/ubridge-{{ app_gns3_ubridge_version }}"
+app_gns3_ubridge_path: /usr/local/bin/ubridge
+app_gns3_ubridge_marker: "/etc/hm1/gns3-ubridge-{{ app_gns3_ubridge_version }}"
+
+# ---- listen
+app_gns3_host: 0.0.0.0
+app_gns3_port: 3080
+# node consoles (flows.yaml tru-gns3-ui allows 5000-5099/tcp; widen both by PR)
+app_gns3_console_start: 5000
+app_gns3_console_end: 5099
+
+# ---- QEMU: fail instead of silently running without KVM
+app_gns3_require_kvm: true
