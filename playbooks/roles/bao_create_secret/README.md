@@ -1,7 +1,17 @@
-# bao_create_secret
+# playbooks/roles/bao_create_secret
 
-Pipeline-owned role (Class C; not in oc-cfg's write scope). The only controller-side action a catalogue role may
-use (lint gate). Proposal: infra `docs/proposals/homelab-apps/5-pipeline-classes.md` 5.1, `5b-security.md`.
+This role creates one secret in OpenBao for a catalogue application. The pipeline owns the role.
+
+## Contents
+
+| File | Purpose |
+|---|---|
+| `tasks/main.yml` | Calls the script |
+| `files/bao_create_secret.py` | Runs on `hm1-shr-cicd01` as `runner-apps-play` and writes the secret |
+
+Tests: `scripts/tests/test_bao_create_secret.py`.
+
+## Use
 
 ```yaml
 - name: Admin password, once
@@ -14,26 +24,31 @@ use (lint gate). Proposal: infra `docs/proposals/homelab-apps/5-pipeline-classes
     data: {username: admin}
     generate: {key: password, length: 28, chars: [ascii_letters, digits]}
     hash: bcrypt
-# then: bao_create_secret_result.hash (status created) -> write it to the guest marker file
 ```
+
+After the run, write `bao_create_secret_result.hash` to the marker file on the guest.
 
 | Input | Rule |
 |---|---|
-| `path` | must equal one `catalog.secrets[].path` of the app being deployed; `<zone>`/`<host>` are filled in by the script from the infra spec of `inventory_hostname`; result must be under `<zone>/secret/apps/<app>/` |
-| `keys` | the catalogue keys of that entry, all of them |
-| `data` | fixed string values (e.g. a username, or k3s tokens read from the guest for escrow) |
-| `generate` | `{key, length 16..128, chars}`; chars from `ascii_letters`, `ascii_lowercase`, `ascii_uppercase`, `digits`, `hexdigits`, `punctuation` (`-_.,:;+=@%`) |
-| `hash` | `bcrypt` or omitted; hashes the generated value; needs `bcrypt` in `/opt/ansible-apps/venv` |
+| `path` | Must equal one `catalog.secrets[].path` of the application. The script fills in `<zone>` and `<host>` from the guest spec. The result must be under `<zone>/secret/apps/<app>/` |
+| `keys` | All the catalogue keys of that entry |
+| `data` | Fixed string values, for example a user name |
+| `generate` | `{key, length, chars}`. The length is from 16 to 128. Allowed `chars`: `ascii_letters`, `ascii_lowercase`, `ascii_uppercase`, `digits`, `hexdigits`, `punctuation` |
+| `hash` | `bcrypt` or no value. It hashes the generated value. It needs `bcrypt` in `/opt/ansible-apps/venv` |
 
-Result `bao_create_secret_result`: `{status, path, hash}`. `status`: `created`, `exists` (KV answered check-and-set
-mismatch), or `check` (check mode: nothing runs). Plaintext never leaves the script.
+The result `bao_create_secret_result` is `{status, path, hash}`. The status is one of these:
+- `created`: the script wrote the secret.
+- `exists`: OpenBao answered a check-and-set mismatch.
+- `check`: the run is in check mode and nothing ran.
 
-Trust: the script (`files/bao_create_secret.py`, run on CT 300 as `runner-apps-play`) finds its run dir from its own
-location and takes the app, zone, zone mode and child token from it (`inventory.yml`, `hosts`, infra specs, `env`,
-`token`). Caller vars and `environment:` cannot change the app, zone, address or token. The per-app child token is
-create-only on that app's paths, so OpenBao enforces the same limit server-side.
+The plaintext never leaves the script.
 
-**Existing secret:** the child token has `create` only, so OpenBao answers **403** for a path that already holds a
-secret (the existence check makes the write an update). The role fails then instead of passing silently: the guest
-marker is gone but the value is stored, so a human decides (read it from OpenBao or delete it, then re-run).
-Tests: `scripts/tests/test_bao_create_secret.py`.
+## Trust
+
+The script finds its run directory from its own location. It reads the application, the zone, and the child token from that directory. A variable of the caller cannot change them. The child token can only create secrets on the paths of that application. OpenBao enforces the same limit.
+
+Caution: the role is Class C. It is not in the write scope of `oc-cfg`.
+
+Caution: if the secret already exists, OpenBao answers 403 and the role fails. The marker on the guest is gone, but the value is stored. A person reads the value from OpenBao or deletes it, then runs the deploy again.
+
+Back to the root README: [../../../README.md](../../../README.md)
