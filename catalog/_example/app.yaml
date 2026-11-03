@@ -33,7 +33,7 @@ health:                          # plain shell on the guest, exit 0 = healthy, n
   command: "curl -fsS --max-time 5 http://127.0.0.1:8080/ >/dev/null"
   timeout_s: 20
 reboot:
-  policy: single
+  policy: one_at_a_time          # one_at_a_time | pair | drain (infra scripts/reboot_guest.py)
   timeout_s: 600
 probes:
   - {name: http, module: http_2xx, port: 8080, path: /}
