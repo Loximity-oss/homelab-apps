@@ -82,6 +82,9 @@ command:
   app-dc-ntp-signd-socket:
     exec: 'test -S {{ ntp_signd }}/socket; rc=$?; echo "ntp_signd socket rc=$rc"; test $rc -eq 0'
     exit-status: 0
+  app-dc-resolv-conf-pve-ignore:
+    exec: 'test -f /etc/.pve-ignore.resolv.conf; rc=$?; echo "pve-ignore marker rc=$rc"; test $rc -eq 0'
+    exit-status: 0
   app-dc-resolv-conf:
     exec: 'grep -q "^nameserver {{ my_ip }}$" /etc/resolv.conf; rc=$?; echo "resolv.conf nameserver {{ my_ip }} rc=$rc"; test $rc -eq 0'
     exit-status: 0

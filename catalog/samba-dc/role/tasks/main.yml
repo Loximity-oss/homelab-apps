@@ -298,6 +298,14 @@
     state: absent
   when: _sdc_resolv_final.stat.islnk | default(false)
 
+# Proxmox rewrites /etc/resolv.conf at every CT start from the guest's nameserver/searchdomain (the guest module sets the
+# zone resolvers, not the DC itself). This marker makes pve-container leave the file alone, so the DC keeps resolving through itself.
+- name: Proxmox must not rewrite resolv.conf at CT start
+  ansible.builtin.copy:
+    dest: /etc/.pve-ignore.resolv.conf
+    content: "managed by the samba-dc role: the DC resolves through itself\n"
+    mode: "0644"
+
 - name: resolv.conf to the DC itself
   ansible.builtin.copy:
     dest: /etc/resolv.conf
