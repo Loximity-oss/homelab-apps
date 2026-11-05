@@ -161,9 +161,9 @@
       --dns-backend=SAMBA_INTERNAL \
       --use-rfc2307 \
       --option='dns forwarder = {{ app_samba_dc_dns_forwarder }}' \
-{% if app_samba_dc_use_eadb %}
+    {% if app_samba_dc_use_eadb %}
       --option='posix:eadb = {{ app_samba_dc_eadb }}' \
-{% endif %}
+    {% endif %}
       --adminpass="$(cat {{ app_samba_dc_pass_file }})"
   args:
     creates: "{{ app_samba_dc_private_dir }}/sam.ldb"
