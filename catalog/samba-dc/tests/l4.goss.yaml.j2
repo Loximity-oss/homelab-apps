@@ -1,0 +1,87 @@
+# L4 app checks for the Samba AD DC on {{ inventory_hostname }}. Read-only, loopback only, no credentials
+# (anonymous rootDSE and anonymous share listing only; no kinit, no Administrator password).
+# Role defaults may not be loaded when this renders, so every value has the same literal as fallback (keep in sync with
+# role/defaults/main.yml). Listeners are checked with ss (Samba opens dual-stack sockets that Goss port: would miss).
+{% set dns_domain = app_samba_dc_dns_domain | default('ad.lox-internal.dev') %}
+{% set series = app_samba_dc_series | default('4.23.') %}
+{% set ntp_signd = app_samba_dc_ntp_signd | default('/var/lib/samba/ntp_signd') %}
+{% set use_eadb = app_samba_dc_use_eadb | default(true) %}
+{% set eadb = app_samba_dc_eadb | default('/var/lib/samba/private/eadb.tdb') %}
+{% set my_ip = ansible_host | default('127.0.0.1') %}
+service:
+  samba-ad-dc:
+    enabled: true
+    running: true
+  chrony:
+    enabled: true
+    running: true
+  smbd:
+    running: false
+  nmbd:
+    running: false
+  winbind:
+    running: false
+command:
+  app-dc-version:
+    exec: 'v=$(samba --version); echo "$v"; echo "$v" | grep -q "{{ series }}"'
+    exit-status: 0
+  app-dc-listen-dns-tcp:
+    exec: 'n=$(ss -Hltnp "sport = :53" | grep -c samba); echo "samba tcp/53 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-listen-dns-udp:
+    exec: 'n=$(ss -Hlunp "sport = :53" | grep -c samba); echo "samba udp/53 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-listen-kerberos:
+    exec: 'n=$(ss -Hltnp "sport = :88" | grep -c samba); echo "samba tcp/88 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-listen-ldap:
+    exec: 'n=$(ss -Hltnp "sport = :389" | grep -c samba); echo "samba tcp/389 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-listen-ldaps:
+    exec: 'n=$(ss -Hltnp "sport = :636" | grep -c samba); echo "samba tcp/636 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-listen-smb:
+    exec: 'n=$(ss -Hltnp "sport = :445" | grep -c samba); echo "samba tcp/445 listeners: $n"; test "$n" -gt 0'
+    exit-status: 0
+  app-dc-srv-ldap:
+    exec: 'a=$(dig +short +time=3 +tries=2 @127.0.0.1 _ldap._tcp.dc._msdcs.{{ dns_domain }} SRV); echo "SRV: $a"; test -n "$a"'
+    exit-status: 0
+    timeout: 20000
+  app-dc-srv-kerberos:
+    exec: 'a=$(dig +short +time=3 +tries=2 @127.0.0.1 _kerberos._tcp.{{ dns_domain }} SRV); echo "SRV: $a"; test -n "$a"'
+    exit-status: 0
+    timeout: 20000
+  app-dc-dns-own-address:
+    exec: 'a=$(dig +short +time=3 +tries=2 @127.0.0.1 {{ inventory_hostname }}.{{ dns_domain }} A); echo "{{ inventory_hostname }}.{{ dns_domain }} -> $a"; test "$a" = "{{ my_ip }}"'
+    exit-status: 0
+    timeout: 20000
+  app-dc-dns-forwarder:
+    exec: 'a=$(dig +short +time=3 +tries=2 @127.0.0.1 example.com A); rc=$?; echo "dig rc=$rc answer: $(echo $a | head -c 120)"; test $rc -eq 0 && echo "$a" | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"'
+    exit-status: 0
+    timeout: 20000
+  app-dc-domain-info:
+    exec: 'o=$(samba-tool domain info 127.0.0.1); rc=$?; echo "$o" | head -c 300; test $rc -eq 0'
+    exit-status: 0
+    timeout: 20000
+  app-dc-shares:
+    exec: 'o=$(smbclient -L 127.0.0.1 -N 2>&1); echo "$o" | head -c 300; echo "$o" | grep -q sysvol && echo "$o" | grep -q netlogon'
+    exit-status: 0
+    timeout: 20000
+  app-dc-testparm:
+    exec: 'testparm -s >/dev/null 2>&1; rc=$?; echo "testparm rc=$rc"; test $rc -eq 0'
+    exit-status: 0
+  app-dc-sysvol-acls:
+    exec: 'o=$(samba-tool ntacl sysvolcheck 2>&1); rc=$?; echo "sysvolcheck rc=$rc $(echo $o | head -c 200)"; test $rc -eq 0'
+    exit-status: 0
+    timeout: 30000
+{% if use_eadb %}
+  app-dc-eadb:
+    exec: 'test -s {{ eadb }} && testparm -s --parameter-name="posix:eadb" 2>/dev/null | grep -q "{{ eadb }}"; rc=$?; echo "posix:eadb {{ eadb }} rc=$rc"; test $rc -eq 0'
+    exit-status: 0
+{% endif %}
+  app-dc-ntp-signd-socket:
+    exec: 'test -S {{ ntp_signd }}/socket; rc=$?; echo "ntp_signd socket rc=$rc"; test $rc -eq 0'
+    exit-status: 0
+  app-dc-resolv-conf:
+    exec: 'grep -q "^nameserver {{ my_ip }}$" /etc/resolv.conf; rc=$?; echo "resolv.conf nameserver {{ my_ip }} rc=$rc"; test $rc -eq 0'
+    exit-status: 0

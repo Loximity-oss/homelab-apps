@@ -1,0 +1,14 @@
+- name: restart resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
+
+- name: restart samba-ad-dc
+  ansible.builtin.systemd:
+    name: samba-ad-dc
+    state: restarted
+
+- name: restart chrony
+  ansible.builtin.systemd:
+    name: chrony
+    state: restarted

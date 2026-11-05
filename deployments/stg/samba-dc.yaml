@@ -1,0 +1,13 @@
+# Samba AD DC feasibility test in stg (unprivileged LXC). Wave 1 per environments.yaml (status beta = stg only).
+# Forwarders: the resolvers the other stg guests use; the wifi AdGuard pair (role default) is in another zone behind the UDM.
+# Realm stays ad.lox-internal.dev: the stg domain is a throwaway, never joined to anything.
+app: samba-dc
+zone: stg
+hosts: [hm1-stg-dc01]
+version: catalog
+pin_until: null
+wave: 1
+pattern: null
+vars:
+  app_samba_dc_dns_forwarder: "1.1.1.1 8.8.8.8"
+host_vars: {}

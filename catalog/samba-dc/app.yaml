@@ -1,0 +1,49 @@
+# Samba Active Directory domain controller catalogue entry. Schema: homelab-infra docs/proposals/homelab-apps/1-boundary-catalogue.md 1.5.
+# Ubuntu archive package (samba-ad-dc 4.23.x on 26.04), no upstream tarball: the catalogue pin is the upstream version, the role
+# asserts the installed series; OS patching (ring) updates the package, a series change needs a bump PR.
+# Feasibility test: first deployment is an UNPRIVILEGED LXC in stg (posix:eadb instead of security.* xattrs). Fallback (privileged LXC or VM): docs/design.md.
+name: samba-dc
+owner: oc-cfg
+catalog:
+  status: beta                   # example | beta (stg only) | stable | deprecated
+  summary: Samba Active Directory domain controller (realm ad.lox-internal.dev, internal DNS backend)
+  role: dc                       # role code in standards naming/roles.yaml (role_apps dc -> samba-dc: standards #54)
+  pattern: single                # one DC today; a second DC (pair) is a later decision
+  os: [ubuntu]
+  size: {type: lxc, cores: 2, memory_mb: 2048, disk_gb: 16}
+  ports: [53/udp, 53/tcp, 88/tcp, 88/udp, 123/udp, 135/tcp, 137/udp, 138/udp, 139/tcp, 389/tcp, 389/udp, 445/tcp, 464/tcp, 464/udp, 636/tcp, 3268/tcp, 3269/tcp, 49152-65535/tcp]
+  flows:
+    - {from: self-zone, to: self, ports: [53/udp, 53/tcp, 88/tcp, 88/udp, 123/udp, 135/tcp, 137/udp, 138/udp, 139/tcp, 389/tcp, 389/udp, 445/tcp, 464/tcp, 464/udp, 636/tcp, 3268/tcp, 3269/tcp, 49152-65535/tcp]}   # AD clients of its own zone: same L2, no rule
+    - {from: self, to: internet, ports: [53/udp, 53/tcp, 123/udp, 80/tcp, 443/tcp]}   # DNS forwarders (stg: 1.1.1.1/8.8.8.8), NTP upstream, apt
+    - {from: hm1-shr-cicd01, to: self, ports: [22/tcp]}        # pipeline SSH
+    # wifi forwarders (hm1-wifi-dns01/02) are in the same zone as the wifi DC: L2, no rule
+    # no OpenBao flow: the credential escrow runs on CT 300 via bao_create_secret, never from the guest
+  secrets:
+    # Administrator credentials: generated on the guest at first deploy (root-only file, needed in clear by samba-tool provision),
+    # escrowed once into OpenBao (create-only) by the role through bao_create_secret
+    - {path: "<zone>/secret/apps/samba-dc/<host>", keys: [username, password], by: role}
+version:
+  pin: "4.23.6"
+  known:                         # apt package, no downloadable artefact: no checksum
+    "4.23.6": apt-package-no-checksum
+  source: ubuntu:samba-ad-dc
+  url: "apt://ubuntu/samba-ad-dc/{version}"
+  vars: {version: app_samba_dc_version, url: app_samba_dc_url, sha256: app_samba_dc_sha256}
+  bump_class: C                  # a domain controller: Faris approves
+rollout:
+  serial: 1
+  order: sorted
+  stop_on_failure: true
+  health_between_hosts: true
+  groups: []
+health:                          # plain shell on the guest, exit 0 = healthy, no secrets, hard timeout
+  services: [samba-ad-dc]
+  command: "dig @127.0.0.1 _ldap._tcp.dc._msdcs.ad.lox-internal.dev SRV +time=3 +tries=1 +short | grep -q ."
+  timeout_s: 20
+reboot:
+  policy: one_at_a_time
+  timeout_s: 600
+probes:
+  - {name: dns-query, module: dns_udp, port: 53, query: ad.lox-internal.dev}
+tests: tests/l4.goss.yaml.j2
+drift: {in_l4: false}
