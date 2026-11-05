@@ -292,7 +292,7 @@
     path: /etc/resolv.conf
   register: _sdc_resolv_final
 
-- name: resolv.conf is a link: remove it so the file below is a regular file
+- name: Remove the resolv.conf link so the file below is a regular file
   ansible.builtin.file:
     path: /etc/resolv.conf
     state: absent
