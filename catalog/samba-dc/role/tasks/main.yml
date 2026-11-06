@@ -1,0 +1,315 @@
+# Samba AD DC (internal DNS backend). Order: packages -> version check -> port 53 free -> hosts -> Administrator password
+# (generated on the guest, escrowed once) -> provision (once) -> smb.conf -> krb5 -> services -> chrony -> healthcheck -> resolv.conf.
+# Check mode (lint gate 5.1): read-only tasks carry check_mode: false + changed_when: false.
+# Feasibility in an unprivileged LXC: provisioning fails loudly if the container cannot do it (see docs/design.md, fallback).
+- name: Packages
+  ansible.builtin.apt:
+    name:
+      - samba
+      - samba-ad-dc
+      - winbind
+      - smbclient
+      - ldb-tools
+      - bind9-dnsutils
+      - acl
+      - attr
+      - chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+
+- name: Installed Samba version
+  ansible.builtin.command: samba --version
+  register: _sdc_ver
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Installed series matches the catalogue pin
+  ansible.builtin.assert:
+    that:
+      - _sdc_ver.stdout | default('') is search(app_samba_dc_series)
+    fail_msg: "samba --version reports '{{ _sdc_ver.stdout | default('') | trim }}', catalogue series is {{ app_samba_dc_series }}: bump the catalogue pin by PR"
+
+# ---- Port 53: the systemd-resolved stub listener off before samba starts
+- name: Resolved drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Resolved stub listener off
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/samba-dc.conf
+    content: |
+      [Resolve]
+      DNSStubListener=no
+    mode: "0644"
+  notify: restart resolved
+
+- name: Resolver file state
+  ansible.builtin.stat:
+    path: /etc/resolv.conf
+  register: _sdc_resolv
+
+# apt needs a working resolver until samba answers; a link to the stub would stop resolving
+- name: Resolv.conf to the real upstream list when it points at the stub
+  ansible.builtin.file:
+    src: /run/systemd/resolve/resolv.conf
+    dest: /etc/resolv.conf
+    state: link
+    force: true
+  when: _sdc_resolv.stat.islnk | default(false) and _sdc_resolv.stat.lnk_source | default('') is search('stub-resolv.conf')
+  notify: restart resolved
+
+- name: Apply resolved change now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Hosts: samba-tool needs the FQDN to resolve to the guest's address, not to a loopback
+- name: No 127.0.1.1 hostname alias
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    state: absent
+
+- name: FQDN to the guest address
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '\s{{ inventory_hostname }}(\s|$)'
+    line: "{{ ansible_host }} {{ inventory_hostname }}.{{ app_samba_dc_dns_domain }} {{ inventory_hostname }}"
+
+# ---- Administrator password: generated here (samba-tool needs it in clear), root-only file, escrowed once into OpenBao
+# (create-only, bao_create_secret on the controller). The suffix guarantees the Samba complexity classes.
+- name: Hash directory
+  ansible.builtin.file:
+    path: "{{ app_samba_dc_hash_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Generate the Administrator password once (root-only file)
+  ansible.builtin.shell: "umask 077 && printf '%s-Aa1' \"$(openssl rand -hex 14)\" > {{ app_samba_dc_pass_file }}"
+  args:
+    creates: "{{ app_samba_dc_pass_file }}"
+  no_log: true
+
+- name: Read the Administrator password
+  ansible.builtin.slurp:
+    src: "{{ app_samba_dc_pass_file }}"
+  register: _sdc_pass
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Administrator password fact
+  ansible.builtin.set_fact:
+    _sdc_admin_pass: "{{ _sdc_pass.content | default('') | b64decode | trim }}"
+  no_log: true
+
+- name: Escrow marker
+  ansible.builtin.stat:
+    path: "{{ app_samba_dc_escrow_marker }}"
+  register: _sdc_escrow
+
+- name: Store the Administrator credentials once
+  when: not _sdc_escrow.stat.exists
+  no_log: true
+  block:
+    - name: Write once to OpenBao (create-only)
+      ansible.builtin.include_role:
+        name: bao_create_secret
+      vars:
+        path: "<zone>/secret/apps/samba-dc/<host>"
+        keys: [username, password]
+        data:
+          username: "{{ app_samba_dc_admin_user }}"
+          password: "{{ _sdc_admin_pass }}"
+
+    # status exists = stored but the marker is gone (run died between write and marker, or guest rebuilt): a human decides (runbook)
+    - name: The write created the secret (or check mode)
+      ansible.builtin.assert:
+        that:
+          - bao_create_secret_result.status in ['created', 'check']
+        fail_msg: "samba-dc credential escrow: the secret already exists in OpenBao but the marker is missing (see runbook, Administrator password)"
+
+    - name: Marker (after the successful write only)
+      ansible.builtin.copy:
+        dest: "{{ app_samba_dc_escrow_marker }}"
+        content: "stored in OpenBao {{ zone }}/secret/apps/samba-dc/{{ inventory_hostname }}\n"
+        mode: "0600"
+
+# ---- Services that must not run on a DC (samba-ad-dc starts the parts itself)
+- name: Stop and mask the member-server services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: [smbd, nmbd, winbind]
+
+# ---- Provision, once. The existing smb.conf is moved aside (samba-tool refuses to run over one). The password comes from the
+# root-only file (never in Git or in the task text). posix:eadb: NT ACLs in a tdb because an unprivileged LXC cannot set security.* xattrs.
+- name: Provision the domain (first deploy only)
+  ansible.builtin.shell: |
+    set -e
+    if [ -f /etc/samba/smb.conf ]; then mv /etc/samba/smb.conf /etc/samba/smb.conf.pre-provision; fi
+    samba-tool domain provision \
+      --realm={{ app_samba_dc_realm }} \
+      --domain={{ app_samba_dc_domain }} \
+      --server-role=dc \
+      --dns-backend=SAMBA_INTERNAL \
+      --use-rfc2307 \
+      --option='dns forwarder = {{ app_samba_dc_dns_forwarder }}' \
+    {% if app_samba_dc_use_eadb %}
+      --option='posix:eadb = {{ app_samba_dc_eadb }}' \
+    {% endif %}
+      --adminpass="$(cat {{ app_samba_dc_pass_file }})"
+  args:
+    creates: "{{ app_samba_dc_private_dir }}/sam.ldb"
+  notify: restart samba-ad-dc
+
+# ---- Managed smb.conf (provision writes a first one; this is the converged state). testparm validates before it is installed.
+- name: Render smb.conf
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/smb.conf.j2"
+    dest: /etc/samba/smb.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "testparm -s %s"
+  notify: restart samba-ad-dc
+
+- name: Provisioned krb5.conf present
+  ansible.builtin.stat:
+    path: "{{ app_samba_dc_private_dir }}/krb5.conf"
+  register: _sdc_krb5
+
+- name: System krb5.conf from the provisioned one
+  ansible.builtin.copy:
+    src: "{{ app_samba_dc_private_dir }}/krb5.conf"
+    dest: /etc/krb5.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: _sdc_krb5.stat.exists
+
+- name: samba-ad-dc enabled and running
+  ansible.builtin.systemd:
+    name: samba-ad-dc
+    masked: false
+    enabled: true
+    state: started
+
+- name: Apply restarts now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Time: signed NTP for domain members. chrony reads the samba ntp_signd socket (group _chrony).
+- name: chrony may read the ntp_signd socket directory
+  ansible.builtin.file:
+    path: "{{ app_samba_dc_ntp_signd }}"
+    state: directory
+    owner: root
+    group: _chrony
+    mode: "0750"
+
+- name: chrony samba drop-in
+  ansible.builtin.template:
+    src: "{{ role_path }}/../files/chrony-samba-dc.conf.j2"
+    dest: /etc/chrony/conf.d/samba-dc.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart chrony
+
+# In a container chrony.service does not start (ConditionVirtualization) and cannot set the clock: start it, serve host time.
+- name: chrony unit drop-in for containers
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/chrony.service.d/container.conf
+    content: |
+      [Unit]
+      ConditionVirtualization=
+    mode: "0644"
+  when: app_samba_dc_chrony_container
+  register: _sdc_chrony_unit
+  notify: restart chrony
+
+- name: chrony options for containers (no clock control)
+  ansible.builtin.copy:
+    dest: /etc/default/chrony
+    content: |
+      DAEMON_OPTS="-F 1 -x"
+    mode: "0644"
+  when: app_samba_dc_chrony_container
+  notify: restart chrony
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _sdc_chrony_unit.changed | default(false)
+
+- name: chrony enabled and running
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Apply chrony restarts now
+  ansible.builtin.meta: flush_handlers
+
+# ---- Healthcheck: the AD SRV record answers, forwarders resolve, anonymous domain info
+- name: Healthcheck DC SRV record
+  ansible.builtin.command: "dig +short +time=3 +tries=1 @127.0.0.1 _ldap._tcp.dc._msdcs.{{ app_samba_dc_dns_domain }} SRV"
+  register: _sdc_srv
+  retries: 20
+  delay: 3
+  until: _sdc_srv.rc == 0 and _sdc_srv.stdout | trim | length > 0
+  changed_when: false
+  check_mode: false
+
+- name: Healthcheck forwarders (external name)
+  ansible.builtin.command: "dig +short +time=3 +tries=1 @127.0.0.1 example.com A"
+  register: _sdc_fwd
+  retries: 10
+  delay: 3
+  until: _sdc_fwd.rc == 0 and _sdc_fwd.stdout | trim | length > 0
+  changed_when: false
+  check_mode: false
+
+- name: Healthcheck domain info (anonymous rootDSE)
+  ansible.builtin.command: "samba-tool domain info 127.0.0.1"
+  register: _sdc_info
+  retries: 10
+  delay: 3
+  until: _sdc_info.rc == 0
+  changed_when: false
+  check_mode: false
+
+# ---- The DC resolves through itself (last: apt and the downloads above needed the old resolver)
+- name: Resolver file state (final)
+  ansible.builtin.stat:
+    path: /etc/resolv.conf
+  register: _sdc_resolv_final
+
+- name: Remove the resolv.conf link so the file below is a regular file
+  ansible.builtin.file:
+    path: /etc/resolv.conf
+    state: absent
+  when: _sdc_resolv_final.stat.islnk | default(false)
+
+# Proxmox rewrites /etc/resolv.conf at every CT start from the guest's nameserver/searchdomain (the guest module sets the
+# zone resolvers, not the DC itself). This marker makes pve-container leave the file alone, so the DC keeps resolving through itself.
+- name: Proxmox must not rewrite resolv.conf at CT start
+  ansible.builtin.copy:
+    dest: /etc/.pve-ignore.resolv.conf
+    content: "managed by the samba-dc role: the DC resolves through itself\n"
+    mode: "0644"
+
+- name: resolv.conf to the DC itself
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    content: |
+      search {{ app_samba_dc_dns_domain }}
+      nameserver {{ ansible_host }}
+    mode: "0644"

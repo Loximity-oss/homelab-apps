@@ -1,0 +1,5 @@
+# Managed by homelab-apps (catalog/samba-dc). Signed NTP for AD domain members.
+ntpsigndsocket {{ app_samba_dc_ntp_signd }}
+allow {{ app_samba_dc_ntp_allow }}
+# keeps serving (host time) when no upstream answers, e.g. in a container where the clock is not ours
+local stratum 10

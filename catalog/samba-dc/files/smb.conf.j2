@@ -1,0 +1,21 @@
+# Managed by homelab-apps (catalog/samba-dc). Manual edits are reverted at the next deploy; change it by PR.
+# Realm, workgroup and server role equal what `samba-tool domain provision` wrote; the rest is converged state.
+[global]
+	dns forwarder = {{ app_samba_dc_dns_forwarder }}
+	realm = {{ app_samba_dc_realm }}
+	server role = active directory domain controller
+	workgroup = {{ app_samba_dc_domain }}
+	idmap_ldb:use rfc2307 = yes
+	ldap server require strong auth = yes
+{% if app_samba_dc_use_eadb %}
+	# unprivileged LXC: NT ACLs in a tdb instead of security.* xattrs
+	posix:eadb = {{ app_samba_dc_eadb }}
+{% endif %}
+
+[sysvol]
+	path = /var/lib/samba/sysvol
+	read only = No
+
+[netlogon]
+	path = /var/lib/samba/sysvol/{{ app_samba_dc_dns_domain }}/scripts
+	read only = No

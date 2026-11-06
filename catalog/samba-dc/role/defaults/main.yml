@@ -1,0 +1,36 @@
+# Shared defaults for every samba-dc deployment. Per-zone or per-host values go into deployments/<zone>/samba-dc.yaml
+# `vars` / `host_vars` (they override these). No secrets here.
+
+# ---- structural
+# version, url and sha256 are set at deploy time from catalog version.pin / known / url (version.vars); these are fallbacks.
+app_samba_dc_version: "4.23.6"
+app_samba_dc_sha256: apt-package-no-checksum
+app_samba_dc_url: "apt://ubuntu/samba-ad-dc/{{ app_samba_dc_version }}"
+# series the installed package must match (samba --version); a new series needs a bump PR (catalog pin) first
+app_samba_dc_series: "4.23."
+
+# ---- domain (no Jinja filters allowed by policy: upper/lower variants are separate values)
+app_samba_dc_realm: AD.LOX-INTERNAL.DEV
+app_samba_dc_dns_domain: ad.lox-internal.dev
+app_samba_dc_domain: LOX
+app_samba_dc_admin_user: Administrator
+
+# ---- DNS: Samba internal backend; unresolved names go to the forwarders (space separated, a smb.conf list)
+# wifi (default): the AdGuard pair; stg overrides in its deployment.
+app_samba_dc_dns_forwarder: "192.168.69.10 192.168.69.11"
+
+# ---- unprivileged LXC: NT ACLs cannot live in security.* xattrs, so they go into a tdb (posix:eadb). Set false on a VM/privileged CT.
+app_samba_dc_use_eadb: true
+app_samba_dc_eadb: /var/lib/samba/private/eadb.tdb
+
+# ---- time: chrony serves signed NTP to domain members through the samba ntp_signd socket
+app_samba_dc_ntp_allow: 192.168.0.0/16
+# a container cannot set the clock (no CAP_SYS_TIME): chronyd -x serves the host's time (`local stratum`). false on a VM.
+app_samba_dc_chrony_container: true
+
+# ---- files
+app_samba_dc_hash_dir: /etc/hm1
+app_samba_dc_pass_file: /etc/hm1/samba-dc-admin.pass
+app_samba_dc_escrow_marker: /etc/hm1/samba-dc-escrow
+app_samba_dc_private_dir: /var/lib/samba/private
+app_samba_dc_ntp_signd: /var/lib/samba/ntp_signd
